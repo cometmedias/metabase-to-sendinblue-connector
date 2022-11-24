@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const {BETTER_UPTIME_HEARTBEAT_URL} = process.env;
 
-export async function metabaseToSendInBlueConnector(request, response) {
+export async function metabaseToSendInBlueConnector(request: any, response: any) {
     console.info('Starting metabaseToSendInBlueConnector');
 
     if (BETTER_UPTIME_HEARTBEAT_URL) {
