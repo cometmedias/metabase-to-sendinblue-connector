@@ -18,6 +18,8 @@ export async function metabaseToSendInBlueConnector(request: Request, response: 
         contacts: await metabaseClient.fetchContacts(question.id)
     }));
 
+    logger.info('contactList', contactLists);
+
     if (config.betteruptime.heartbeatUrl) {
         logger.info('sending heartbeat to BetterUpTime');
         await axios.get(config.betteruptime.heartbeatUrl);
@@ -26,5 +28,5 @@ export async function metabaseToSendInBlueConnector(request: Request, response: 
     return response.send(201);
 }
 
-// @ts-ignore
-(async () => await metabaseToSendInBlueConnector(null, {send: console.log}))();
+// @ts-ignore pour tester en local
+// (async () => await metabaseToSendInBlueConnector(null, {send: console.log}))();
