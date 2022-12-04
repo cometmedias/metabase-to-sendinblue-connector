@@ -4,8 +4,23 @@ import {logger} from './logger';
 
 export interface MetabaseConfig {
     host: string;
-    username: any;
+    username: string;
     password: any;
+}
+
+interface Question {
+    name: string;
+    id: number;
+}
+
+interface Contact {
+    email: string;
+    [additionalProperties: string]: string | number | boolean;
+}
+
+export interface ContactList {
+    question: Question;
+    contacts: Contact[];
 }
 
 export class MetabaseClient {
@@ -28,8 +43,8 @@ export class MetabaseClient {
             .catch(onAxiosError('cannot make request on metabase'));
     }
 
+    // https://www.metabase.com/docs/latest/api/session.html#post-apisession
     private authenticate() {
-        // https://www.metabase.com/docs/latest/api/session.html#post-apisession
         console.log(this.config.host);
         return axios({
             method: 'POST',
@@ -44,20 +59,29 @@ export class MetabaseClient {
     }
 
     // https://www.metabase.com/docs/latest/api/card#get-apicard
-    fetchAllQuestions(): Promise<any> {
+    fetchQuestions(): Promise<Question[]> {
         return this.makeRequest({
             method: 'GET',
             url: `${this.config.host}/api/card`
-        }).catch(onError('cannot fetch all questions on metabase'));
+        })
+            .then((response) => response.data)
+            .then((collections) => collections.filter((collection: any) => collection.name.toLowerCase().startsWith('sendinblue')))
+            .then((collections) =>
+                collections.map((collection: any) => ({
+                    name: collection.name,
+                    id: collection.id
+                }))
+            )
+            .catch(onError("cannot fetch sendinblue's questions on metabase"));
     }
 
     // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
-    runQuestionQuery(questionId: number) {
+    fetchContacts(questionId: number): Promise<any> {
         return this.makeRequest({
             method: 'POST',
             url: `${this.config.host}/api/card/${questionId}/query`
         })
-            .then((res) => res.data.data)
+            .then((response) => response.data.data)
             .then(({rows, cols}) => {
                 return rows.map((row: any) => {
                     return row.reduce((acc: any, value: any, index: number) => {
@@ -69,22 +93,3 @@ export class MetabaseClient {
             .catch(onError(`cannot run question ${questionId} on metabase`));
     }
 }
-
-// const client = new MetabaseClient(config.metabase);
-
-// client
-//     .fetchAllQuestions()
-//     .then((questions) => {
-//         return questions.filter((question: any) => {
-//             return question.name.startsWith('sendinblue');
-//         });
-//     })
-//     .then((res) => {
-//         return client.runQuestionQuery(res[0].id);
-//     })
-//     .then((res) => {
-//         console.log('res', res);
-//     })
-//     .catch((error) => {
-//         console.log('error', error);
-//     });

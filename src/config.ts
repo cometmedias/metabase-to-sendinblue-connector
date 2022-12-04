@@ -5,7 +5,7 @@ import {SendinblueConfig} from './sendinblue';
 const commonEnv = require('common-env/withLogger')(logger);
 
 interface BetteruptimeConfig {
-    hearthbeatUrl: string;
+    heartbeatUrl: string;
 }
 
 interface Config {
@@ -24,7 +24,7 @@ const defaultConfig: Config = {
     metabase: {
         host: '',
         username: '',
-        password: secureString
+        password: secureString,
     },
     sendinblue: {
         baseUrl: 'https://api.sendinblue.com/v3',
@@ -32,7 +32,7 @@ const defaultConfig: Config = {
         listId: 0
     },
     betteruptime: {
-        hearthbeatUrl: ''
+        heartbeatUrl: ''
     }
 };
 
