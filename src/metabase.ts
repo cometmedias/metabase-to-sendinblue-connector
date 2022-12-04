@@ -1,6 +1,7 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
+import {Promise} from 'bluebird';
 
 export interface MetabaseConfig {
     host: string;
@@ -9,8 +10,8 @@ export interface MetabaseConfig {
 }
 
 export interface Question {
-    name: string;
     id: number;
+    name: string;
 }
 
 export interface Contact {
@@ -18,8 +19,7 @@ export interface Contact {
     [additionalProperties: string]: string | number | boolean;
 }
 
-export interface ContactList {
-    question: Question;
+export interface MetabaseContactList extends Question {
     contacts: Contact[];
 }
 
@@ -28,7 +28,7 @@ export class MetabaseClient {
 
     constructor(private config: MetabaseConfig) {}
 
-    private makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
+    private async makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
         logger.info(`making request on metabase: ${JSON.stringify(axiosConfig)}`);
         return (this.token ? Promise.resolve() : this.authenticate())
             .then(() => {
@@ -44,7 +44,7 @@ export class MetabaseClient {
     }
 
     // https://www.metabase.com/docs/latest/api/session.html#post-apisession
-    private authenticate(): Promise<void> {
+    private async authenticate(): Promise<void> {
         console.log(this.config.host);
         return axios({
             method: 'POST',
@@ -59,24 +59,25 @@ export class MetabaseClient {
     }
 
     // https://www.metabase.com/docs/latest/api/card#get-apicard
-    fetchQuestions(): Promise<Question[]> {
+    public async fetchQuestions(): Promise<Question[]> {
         return this.makeRequest({
             method: 'GET',
             url: `${this.config.host}/api/card`
         })
             .then((response) => response.data)
-            .then((collections) => collections.filter((collection: any) => collection.name.toLowerCase().startsWith('sendinblue')))
-            .then((collections) =>
-                collections.map((collection: any) => ({
-                    name: collection.name,
-                    id: collection.id
+            .then((questions) => questions.map((question: any) => ({...question, name: question.name.toLowerCase()})))
+            .then((questions) => questions.filter((question: any) => question.name.startsWith('sendinblue')))
+            .then((questions) =>
+                questions.map((question: any) => ({
+                    name: question.name,
+                    id: question.id
                 }))
             )
             .catch(onError("cannot fetch sendinblue's questions on metabase"));
     }
 
     // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
-    fetchContacts(questionId: number): Promise<Contact[]> {
+    public async fetchContacts(questionId: number): Promise<Contact[]> {
         return this.makeRequest({
             method: 'POST',
             url: `${this.config.host}/api/card/${questionId}/query`
@@ -91,5 +92,12 @@ export class MetabaseClient {
                 });
             })
             .catch(onError(`cannot run question ${questionId} on metabase`));
+    }
+
+    public async fetchContactLists(questions: Question[]): Promise<MetabaseContactList[]> {
+        return Promise.map<Question, MetabaseContactList>(questions, async (question: Question) => ({
+            ...question,
+            contacts: await this.fetchContacts(question.id)
+        }));
     }
 }

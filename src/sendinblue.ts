@@ -1,6 +1,12 @@
-import axios, {AxiosRequestConfig} from 'axios';
+import axios, {Axios, AxiosRequestConfig, AxiosResponse} from 'axios';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
+import {Contact} from './metabase';
+
+export interface SendinblueContactList {
+    id: string;
+    name: string;
+}
 
 function formatEmail(email: string): string {
     // "fanny_michaud2000@yahoo.fr / fanny.michaud@nantesmetropole.fr"
@@ -32,10 +38,10 @@ export interface SendinblueConfig {
     listId: number;
 }
 
-export class Sendinblue {
+export class SendinblueClient {
     constructor(private config: SendinblueConfig) {}
 
-    private makeRequest(axiosConfig: AxiosRequestConfig) {
+    private async makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
         logger.info(`making request on sendinblue: ${JSON.stringify(axiosConfig)}`);
         return axios({
             ...axiosConfig,
@@ -46,8 +52,19 @@ export class Sendinblue {
         }).catch(onAxiosError('cannot make request on sendinblue'));
     }
 
+    public async fetchLists(): Promise<SendinblueContactList[]> {
+        return this.makeRequest({
+            method: 'GET',
+            url: `${this.config.baseUrl}/contacts/lists`
+        })
+            .then((response) => response.data.lists)
+            .then((lists) => lists.map((list: any) => ({...list, name: list.name.toLowerCase()})))
+            .then((lists) => lists.filter((list: any) => list.name.startsWith('metabase')))
+            .catch(onError('cannot fetch contact lists on sendinblue'));
+    }
+
     // https://developers.sendinblue.com/reference/updatebatchcontacts
-    updateContacts(contacts: any[]) {
+    public async updateContacts(contacts: Contact[]) {
         return this.makeRequest({
             method: 'POST',
             url: `${this.config.baseUrl}/contacts/batch`,
@@ -62,7 +79,7 @@ export class Sendinblue {
         }).catch(onError(`cannot update contacts on list ${this.config.listId} on sendinblue`));
     }
 
-    // deleteContacts(contacts: any[]) {
+    // public async deleteContacts(contacts: any[]) {
     //     try {
     //         logger.info(`Deleting ${contacts.length} contacts`);
     //         await forEachAsync(contacts, async (contact) => {
