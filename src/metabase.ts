@@ -1,4 +1,4 @@
-import axios, {AxiosRequestConfig} from 'axios';
+import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
 
@@ -8,12 +8,12 @@ export interface MetabaseConfig {
     password: any;
 }
 
-interface Question {
+export interface Question {
     name: string;
     id: number;
 }
 
-interface Contact {
+export interface Contact {
     email: string;
     [additionalProperties: string]: string | number | boolean;
 }
@@ -28,7 +28,7 @@ export class MetabaseClient {
 
     constructor(private config: MetabaseConfig) {}
 
-    private makeRequest(axiosConfig: AxiosRequestConfig) {
+    private makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
         logger.info(`making request on metabase: ${JSON.stringify(axiosConfig)}`);
         return (this.token ? Promise.resolve() : this.authenticate())
             .then(() => {
@@ -44,7 +44,7 @@ export class MetabaseClient {
     }
 
     // https://www.metabase.com/docs/latest/api/session.html#post-apisession
-    private authenticate() {
+    private authenticate(): Promise<void> {
         console.log(this.config.host);
         return axios({
             method: 'POST',
@@ -76,7 +76,7 @@ export class MetabaseClient {
     }
 
     // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
-    fetchContacts(questionId: number): Promise<any> {
+    fetchContacts(questionId: number): Promise<Contact[]> {
         return this.makeRequest({
             method: 'POST',
             url: `${this.config.host}/api/card/${questionId}/query`
