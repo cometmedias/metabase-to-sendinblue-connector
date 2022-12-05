@@ -69,7 +69,7 @@ export class MetabaseClient {
             .then((questions) => questions.filter((question: any) => question.name.startsWith('sendinblue')))
             .then((questions) =>
                 questions.map((question: any) => ({
-                    name: question.name,
+                    name: question.name.replace(/^sendinblue/, 'metabase'),
                     id: question.id
                 }))
             )

@@ -24,12 +24,13 @@ const defaultConfig: Config = {
     metabase: {
         host: '',
         username: '',
-        password: secureString,
+        password: secureString
     },
     sendinblue: {
         baseUrl: 'https://api.sendinblue.com/v3',
         apiKey: secureString,
-        listId: 0
+        folderId: 1,
+        attributeCategory: 'normal'
     },
     betteruptime: {
         heartbeatUrl: ''

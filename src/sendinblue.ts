@@ -1,4 +1,5 @@
-import axios, {Axios, AxiosRequestConfig, AxiosResponse} from 'axios';
+import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
+import {Promise} from 'bluebird';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
 import {Contact} from './metabase';
@@ -35,7 +36,8 @@ function formatEmail(email: string): string {
 export interface SendinblueConfig {
     baseUrl: string;
     apiKey: any;
-    listId: number;
+    folderId: number;
+    attributeCategory: string;
 }
 
 export class SendinblueClient {
@@ -52,6 +54,7 @@ export class SendinblueClient {
         }).catch(onAxiosError('cannot make request on sendinblue'));
     }
 
+    // https://developers.sendinblue.com/reference/getlists-1
     public async fetchLists(): Promise<SendinblueContactList[]> {
         return this.makeRequest({
             method: 'GET',
@@ -63,20 +66,59 @@ export class SendinblueClient {
             .catch(onError('cannot fetch contact lists on sendinblue'));
     }
 
+    // https://developers.sendinblue.com/reference/createlist-1
+    public async createContactLists(listNames: string[]): Promise<void> {
+        await Promise.map(listNames, async (listName: string) => {
+            await this.makeRequest({
+                method: 'POST',
+                url: `${this.config.baseUrl}/contacts/lists`,
+                data: {
+                    name: listName,
+                    folderId: this.config.folderId
+                }
+            });
+        }).catch(onError(`cannot create contact lists on sendinblue`));
+    }
+
+    // https://developers.sendinblue.com/reference/getattributes-1
+    public async fetchContactAttributes(): Promise<string[]> {
+        return this.makeRequest({
+            method: 'GET',
+            url: `${this.config.baseUrl}/contacts/attributes`
+        })
+            .then((response) => response.data.attributes)
+            .then((attributes) => attributes.map((attribute: any) => attribute.name))
+            .catch(onError('cannot fetch contact attributes on sendinblue'));
+    }
+
+    // https://developers.sendinblue.com/reference/createattribute-1
+    public async createContactAttributes(attributeNames: string[]): Promise<void> {
+        await Promise.map(attributeNames, async (attributeName: string) => {
+            await this.makeRequest({
+                method: 'POST',
+                url: `${this.config.baseUrl}/contacts/lists`,
+                data: {
+                    attributeCategory: this.config.attributeCategory,
+                    attributeName
+                }
+            });
+        }).catch(onError(`cannot create contact attributes on sendinblue`));
+    }
+
     // https://developers.sendinblue.com/reference/updatebatchcontacts
     public async updateContacts(contacts: Contact[]) {
-        return this.makeRequest({
-            method: 'POST',
-            url: `${this.config.baseUrl}/contacts/batch`,
-            data: {
-                contacts: contacts.map((contact) => {
-                    return {
-                        ...contact,
-                        listIds: [this.config.listId]
-                    };
-                })
-            }
-        }).catch(onError(`cannot update contacts on list ${this.config.listId} on sendinblue`));
+        // return this.makeRequest({
+        //     method: 'POST',
+        //     url: `${this.config.baseUrl}/contacts/batch`,
+        //     data: {
+        //         contacts: contacts.map((contact) => {
+        //             return {
+        //                 ...contact,
+        //                 listIds: [this.config.listId]
+        //             };
+        //         })
+        //     }
+        // }).catch(onError(`cannot update contacts on list ${this.config.listId} on sendinblue`));
     }
 
     // public async deleteContacts(contacts: any[]) {

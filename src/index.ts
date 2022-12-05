@@ -1,44 +1,88 @@
 import axios from 'axios';
-import {Promise} from 'bluebird';
 import {logger} from './logger';
 import {config} from './config';
-import {MetabaseClient, MetabaseContactList, Question} from './metabase';
+import {MetabaseClient} from './metabase';
 import {SendinblueClient} from './sendinblue';
 import type {Request, Response} from 'express';
+import {ArrayUtils} from './array';
 
 export async function metabaseToSendInBlueConnector(request: Request, response: Response) {
     logger.info('starting metabaseToSendInBlueConnector');
 
-    // Fetching contact lists from metabase
-    logger.info('fetching questions from metabase...');
+    // Instantiate clients
+    const sendinblueClient = new SendinblueClient(config.sendinblue);
     const metabaseClient = new MetabaseClient(config.metabase);
+
+    /**
+     * CONTACT LISTS
+     *
+     * Getting contact lists from both Metabase and SendInBlue
+     * Create missing lists in SendInBlue if necessary
+     */
+
+    // Fetching questions from metabase
+    logger.info('fetching questions from metabase...');
     const questions = await metabaseClient.fetchQuestions();
 
+    // Stop the process if no list to synchronize
+    if (questions.length === 0) {
+        logger.info('no list to synchronize');
+        return;
+    }
+
+    // Fetching contact lists from metabase
     logger.info('fetching contacts from metabase...');
     const metabaseContactLists = await metabaseClient.fetchContactLists(questions);
 
     // Fetching contact lists from sendinblue
     logger.info('fetching contact lists from sendinblue...');
-    const sendinblueClient = new SendinblueClient(config.sendinblue);
     const sendinblueContactLists = await sendinblueClient.fetchLists();
 
-    // Identify lists to synchronize
-    // TODO: Would be nice to refactor, this is just a draft
-    const missingListsInMetabase = metabaseContactLists.filter((mlist) => !sendinblueContactLists.find((slist) => mlist.name === slist.name));
+    // Compute contact lists presents in Metabase but missing in Sendinblue
+    const missingListsInSendInBlue = ArrayUtils.elementsNotInArray(metabaseContactLists, sendinblueContactLists, 'name');
+
+    // Create missing contact lists in SendInBlue
+    if (missingListsInSendInBlue.length > 0) {
+        logger.info(`creating ${missingListsInSendInBlue.length} (missing) list(s) in sendinblue`, {lists: missingListsInSendInBlue});
+        await sendinblueClient.createContactLists(missingListsInSendInBlue.map((list) => list.name));
+    }
+
+    logger.info(`${metabaseContactLists.length} list(s) to synchronize`);
+
+    // Compute contact lists presents in SendInBlue but missing in Metabase, log purpose only
+    const missingListsInMetabase = ArrayUtils.elementsNotInArray(sendinblueContactLists, metabaseContactLists, 'name');
     missingListsInMetabase.length > 0 && logger.warn(`following list are missing in Metabase: ${missingListsInMetabase.map((list) => list.name).join(', ')}`);
 
-    const missingListsInSendInBlue = sendinblueContactLists.filter((slist) => !metabaseContactLists.find((mlist) => mlist.name === slist.name));
-    missingListsInSendInBlue.length > 0 && logger.warn(`following list are missing in SendInBlue: ${missingListsInSendInBlue.map((list) => list.name).join(', ')}`);
+    /**
+     * CONTACT ATTRIBUTES
+     *
+     * Getting contact attributes from both Metabase and SendInBlue
+     * Create missing lists in SendInBlue if necessary
+     */
 
-    const listsToSynchronize = metabaseContactLists.reduce((lists: any[], mlist) => {
-        const sendinblueListId = sendinblueContactLists.find((slist) => slist.name === mlist.name.replace('metabase', 'sendinblue'));
-        return sendinblueListId ? [...lists, {...mlist, sendinblueListId}] : lists;
-    }, []);
-    listsToSynchronize.length > 0 ? logger.info(`synchronizing ${listsToSynchronize.length} lists`) : logger.info('no list to synchronize');
+    // Concat every Metabase list attributes
+    // Take the first contact of every list and get its attributes
+    logger.info('concatenating contact attributes from metabase...');
+    const metabaseContactAttributes = metabaseContactLists.flatMap(({contacts}) => Object.keys(contacts[0] ?? {}));
+    const distinctMetabaseContactAttributes = ArrayUtils.distinctArray(metabaseContactAttributes).map((attribute) => attribute.toUpperCase());
 
-    // TODO: (Required) Fetch sendinblue contact lists' attributes
-    //       If missing, must update contact attributes list: https://developers.sendinblue.com/reference/createattribute-1
-    // TODO: (Required) Uppercase attributes
+    // Fetch sendinblue contact attributes
+    logger.info('fetching contact attributes from sendinblue...');
+    const sendinblueContactAttributes = ['EMAIL', ...(await sendinblueClient.fetchContactAttributes())];
+
+    // Identify attributes to create
+    const missingAttributesInSendinblue = ArrayUtils.elementsNotInArray(metabaseContactAttributes, sendinblueContactAttributes);
+
+    // Create missing contact attributes in SendInBlue
+    if (missingAttributesInSendinblue.length > 0) {
+        logger.info(`creating ${missingAttributesInSendinblue.length} (missing) attribute(s) in sendinblue`, {attributes: missingAttributesInSendinblue});
+        await sendinblueClient.createContactAttributes(missingAttributesInSendinblue);
+    }
+
+    /**
+     * SYNCHRONIZE CONTACTS
+     */
+
     // TODO: (Optional) Specific to cometmedias: some emails need to be cleaned before import
     // TODO: (Optional) Identify which contacts to add / delete (we could just bulk delete and bulk create)
     // TODO: (Required) Update lists
