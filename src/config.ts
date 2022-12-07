@@ -5,36 +5,37 @@ import {SendinblueConfig} from './sendinblue';
 const commonEnv = require('common-env/withLogger')(logger);
 
 interface BetteruptimeConfig {
-    heartbeatUrl: string;
+  heartbeatUrl: string;
 }
 
 interface Config {
-    metabase: MetabaseConfig;
-    sendinblue: SendinblueConfig;
-    betteruptime: BetteruptimeConfig;
+  metabase: MetabaseConfig;
+  sendinblue: SendinblueConfig;
+  betteruptime: BetteruptimeConfig;
 }
 
 const secureString = {
-    $type: commonEnv.types.String,
-    $secure: true,
-    $default: ''
+  $type: commonEnv.types.String,
+  $secure: true,
+  $default: ''
 };
 
 const defaultConfig: Config = {
-    metabase: {
-        host: '',
-        username: '',
-        password: secureString
-    },
-    sendinblue: {
-        baseUrl: 'https://api.sendinblue.com/v3',
-        apiKey: secureString,
-        folderId: 1,
-        attributeCategory: 'normal'
-    },
-    betteruptime: {
-        heartbeatUrl: ''
-    }
+  metabase: {
+    host: '',
+    username: '',
+    password: secureString,
+    collectionId: 0
+  },
+  sendinblue: {
+    baseUrl: 'https://api.sendinblue.com/v3',
+    apiKey: secureString,
+    folderId: 1,
+    attributeCategory: 'normal'
+  },
+  betteruptime: {
+    heartbeatUrl: ''
+  }
 };
 
 export const config: Config = commonEnv.getOrElseAll(defaultConfig);

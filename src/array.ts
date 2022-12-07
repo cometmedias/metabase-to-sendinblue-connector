@@ -1,17 +1,19 @@
-export class ArrayUtils {
-    static elementsNotInArray(firstArray: any[], secondArray: any[], key?: string): any[] {
-        return firstArray.filter((firstElement) => {
-            return !secondArray.find((secondElement) => {
-                if (key) {
-                    return firstElement[key] === secondElement[key];
-                }
+function getValue(el: any, key?: string) {
+  return key ? el[key] : el;
+}
 
-                return firstElement === secondElement;
-            });
-        });
-    }
+export function elementsNotInArray(firstArray: any[], secondArray: any[], key?: string): any[] {
+  const second = new Set(secondArray.map((el) => getValue(el, key)));
+  return firstArray.filter((el) => {
+    return !second.has(getValue(el, key));
+  });
+}
 
-    static distinctArray<T>(array: T[]): T[] {
-        return [...new Set(array)];
-    }
+export function diff<T, U>(firstArray: T[], secondArray: U[], key?: string): {added: U[]; removed: T[]} {
+  const firstArraySet = new Set(firstArray.map((el: any) => getValue(el, key)));
+  const secondArraySet = new Set(secondArray.map((el: any) => getValue(el, key)));
+  return {
+    added: secondArray.filter((el: any) => !firstArraySet.has(getValue(el, key))),
+    removed: firstArray.filter((el: any) => !secondArraySet.has(getValue(el, key)))
+  };
 }
