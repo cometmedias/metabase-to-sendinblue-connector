@@ -1,180 +1,206 @@
 import axios from 'axios';
 import {logger} from './logger';
 import {config} from './config';
-import {DetailedQuestion, MetabaseClient} from './metabase';
-import {SendinblueClient} from './sendinblue';
+import {
+  DetailedQuestion,
+  MetabaseClient,
+  MetabaseAttributes,
+  MetabaseQuestion,
+  MetabaseContactList,
+  MetabaseContact
+} from './metabase';
+import {SendinblueClient, SendinblueContact, SendinblueContactList} from './sendinblue';
 import type {Request, Response} from 'express';
-import {diff} from './array';
-import {mapSeries} from 'bluebird';
+import {diff, filterObjectKeys} from './array';
+import {delay, mapSeries} from 'bluebird';
 import {ConnectorError, onError} from './error';
+import {identity, map, omit, without} from 'lodash';
 
-// export async function metabaseToSendInBlueConnector(request: Request, response: Response) {
-logger.info('starting metabaseToSendInBlueConnector');
-
-// Instantiate clients
 const sendinblueClient = new SendinblueClient(config.sendinblue);
 const metabaseClient = new MetabaseClient(config.metabase);
 
-/**
- * CONTACT LISTS
- *
- * Getting contact lists from both Metabase and SendInBlue
- * Create missing lists in SendInBlue if necessary
- */
-
-function fromMetabaseToSendinblueAttributesTypes(metabaseQuestion: DetailedQuestion): Record<string, string> {
-  function toSendinblueAttributeType(metabaseType: string) {
+type SendinblueAttribute = {type: string; fromMetabaseValue: (value: any) => any};
+function fromMetabaseToSendinblueAttributesTypes(
+  metabaseAttributes: MetabaseAttributes[]
+): Record<string, SendinblueAttribute> {
+  function toSendinblueAttributeType(metabaseType: string): SendinblueAttribute {
     // https://github.com/metabase/metabase/blob/f342fe17bd897dd4940a2c23a150a78202fa6b72/src/metabase/driver/postgres.clj#LL568C29-L581C64
     switch (metabaseType) {
       case 'type/Boolean':
-        return 'boolean';
+        return {type: 'boolean', fromMetabaseValue: identity};
 
-      case 'type/Date':
-      case 'type/DateTime':
-      case 'type/DateTimeWithTZ':
-      case 'type/DateTimeWithLocalTZ':
-      case 'type/Time':
-      case 'type/TimeWithTZ':
-        return 'date';
+      case 'type/Date': // "2022-12-08T00:00:00Z"
+      case 'type/DateTime': // "2022-12-08T09:23:46.107648Z"
+      case 'type/DateTimeWithTZ': // "2022-12-08T09:23:46.107648Z"
+      case 'type/DateTimeWithLocalTZ': // "2022-12-08T09:23:46.107648Z"
+        return {
+          type: 'date',
+          fromMetabaseValue(value: string | null) {
+            if (!value) return null;
+            return value.split('T')[0];
+          }
+        };
 
       case 'type/Decimal':
       case 'type/Float':
       case 'type/Integer':
-        return 'float';
+        return {type: 'float', fromMetabaseValue: identity};
 
-      case 'type/IPAddress':
+      case 'type/Time': // "09:23:46.107648Z"
+      case 'type/TimeWithTZ': // "09:23:46.107648Z"
       case 'type/Text':
+      case 'type/IPAddress':
       case 'type/UUID':
       default:
-        return 'text';
+        return {type: 'text', fromMetabaseValue: identity};
     }
   }
-  return metabaseQuestion.result_metadata.reduce((acc: Record<string, string>, attribute) => {
+  return metabaseAttributes.reduce((acc: Record<string, SendinblueAttribute>, attribute) => {
     acc[attribute.name] = toSendinblueAttributeType(attribute.base_type);
     return acc;
   }, {});
 }
 
-function main() {
-  // Fetching questions from metabase
+function createSendinblueContactLists(metabaseQuestion: MetabaseQuestion) {
+  logger.info(`creating list to sendinblue from metabase question : ${metabaseQuestion.name}`);
+  const sendinblueListName = `${metabaseQuestion.id}_${metabaseQuestion.name}`;
+  const sendinblueFolderId = config.sendinblue.folderId;
+  return sendinblueClient
+    .createContactList(sendinblueListName, sendinblueFolderId)
+    .then((createdList) => createdList.id)
+    .catch(onError(`cannot create sendinblue list: ${sendinblueListName} in folder: ${sendinblueFolderId}`));
+}
+
+function syncAvailableAttributes(metabaseQuestion: MetabaseQuestion): Promise<Record<string, SendinblueAttribute>> {
+  return Promise.all([
+    metabaseClient.fetchQuestion(metabaseQuestion.id),
+    sendinblueClient.fetchContactAttributes()
+  ]).then(([metabaseDetailedQuestion, sendinblueContactAttributes]) => {
+    const diffContactsAttributes = diff(sendinblueContactAttributes, metabaseDetailedQuestion.result_metadata, 'name');
+    const sendinblueAttributesFromMetabase = fromMetabaseToSendinblueAttributesTypes(
+      metabaseDetailedQuestion.result_metadata
+    );
+    const sendinblueAttributesToCreate = filterObjectKeys(sendinblueAttributesFromMetabase, (key) => {
+      return diffContactsAttributes.added.includes(key);
+    });
+    // since the sendinblue attributes are shared between list
+    // we won't remove the sendinblue attributes that don't appear in the metabase question
+    // because they might be used in other sendinblue contacts lists
+    return mapSeries(Object.entries(omit(sendinblueAttributesToCreate, 'email')), ([attributeName, {type}]) => {
+      return sendinblueClient.createContactAttribute(attributeName, type);
+    }).then(() => sendinblueAttributesFromMetabase);
+  });
+}
+
+function syncContacts(
+  sendinblueListId: number,
+  metabaseContacts: MetabaseContact[],
+  sendinblueContacts: SendinblueContact[]
+): Promise<{upserted: MetabaseContact[]; removed: SendinblueContact[]}> {
+  const {added: contactsToRemoveOnSendinblue, removed: contactsToCreateOnSendinblue} = diff(
+    metabaseContacts,
+    sendinblueContacts,
+    'email'
+  );
+  return Promise.all([
+    mapSeries(contactsToCreateOnSendinblue, (contact) => {
+      // create or update contact (add it to sendinblue list)
+      return sendinblueClient
+        .upsertContact({email: contact.email, listIds: [sendinblueListId]})
+        .catch((error) => {
+          logger.error(
+            `encountered an error creating contact ${
+              contact.email
+            } on ${sendinblueListId} sendinblue list (keep going for next contacts): ${JSON.stringify(error)}`
+          );
+        })
+        .then(() => contact);
+    }),
+    mapSeries(contactsToRemoveOnSendinblue, (contact) => {
+      // remove the contact from the current sendinblue list
+      return sendinblueClient
+        .updateContacts([{email: contact.email, unlinkListIds: [sendinblueListId]}])
+        .catch((error) => {
+          logger.error(
+            `encountered an error removing contact ${
+              contact.email
+            } from ${sendinblueListId} sendinblue list (keep going for next contacts): ${JSON.stringify(error)}`
+          );
+        })
+        .then(() => contact);
+    })
+  ]).then(([upsertedContacts, removedContacts]) => {
+    return {
+      upserted: upsertedContacts.filter(Boolean),
+      removed: removedContacts.filter(Boolean)
+    };
+  });
+}
+
+function syncContactAttributesValues(
+  metabaseContacts: MetabaseContact[],
+  sendinblueAttributesFromMetabase: Record<string, SendinblueAttribute>
+): Promise<void> {
+  function toSendinblueAttributes(metabaseContact: MetabaseContact, attributesNames: string[]) {
+    return attributesNames.reduce((acc: Record<string, any>, attributeName) => {
+      const metabaseAttributeValue = metabaseContact[attributeName];
+      const sendinblueAttribute = sendinblueAttributesFromMetabase[attributeName];
+      if (sendinblueAttribute) {
+        acc[attributeName] = sendinblueAttribute.fromMetabaseValue(metabaseAttributeValue);
+      }
+      return acc;
+    }, {});
+  }
+  const sendinblueContactsWithUpdatedAttributes = metabaseContacts.map((metabaseContact) => {
+    const attributesNames = Object.keys(omit(metabaseContact, 'email'));
+    return {
+      email: metabaseContact.email,
+      attributes: toSendinblueAttributes(metabaseContact, attributesNames)
+    };
+  });
+  return sendinblueClient
+    .updateContacts(sendinblueContactsWithUpdatedAttributes)
+    .then(() => {})
+    .catch((error) => {
+      logger.error(`couldn't sync sendinblue contacts, reason: ${JSON.stringify(error)}`);
+    });
+}
+
+export function syncAll() {
   logger.info('fetching questions from metabase...');
-  Promise.all([
+  return Promise.all([
     sendinblueClient.fetchListsOfFolder(config.sendinblue.folderId),
     metabaseClient.fetchQuestionsFromCollection(config.metabase.collectionId)
   ]).then(([sendinblueLists, metabaseQuestions]) => {
+    // 1. for each metabase question...
     return mapSeries(metabaseQuestions, (metabaseQuestion) => {
-      const metabaseContactsList = metabaseClient.runQuestion(metabaseQuestion.id);
       const sendinblueTargetedList = sendinblueLists.find((list) => {
         return list.name.startsWith(`${metabaseQuestion.id}_`);
       });
 
-      (() => {
-        if (sendinblueTargetedList) {
-          return Promise.resolve(sendinblueTargetedList.id);
-        }
-        // créer la liste si elle n'existe pas
-        const sendinblueListName = `${metabaseQuestion.id}_${metabaseQuestion.name}`;
-        const sendinblueFolderId = config.sendinblue.folderId;
-        return sendinblueClient
-          .createContactList(sendinblueListName, sendinblueFolderId)
-          .then((createdList) => createdList.id)
-          .catch(onError(`cannot create sendinblue list: ${sendinblueListName} in folder : ${sendinblueFolderId}`));
-      })().then((sendinblueIdList) => {
-        // comparer les contacts dans la liste sendinblue avec le metabase (ajouter/supprimer/modifier) + vérifier si mêmes attributs
-        Promise.all([
-          metabaseClient.fetchQuestion(metabaseQuestion.id),
-          sendinblueClient.fetchContactAttributes(),
-          sendinblueClient.fetchContactsFromList(sendinblueIdList)
-        ]).then(([metabaseDetailedQuestion, sendinblueContactAttributes, sendinblueContactsList]) => {
-          const diffContactsAttributes = diff(
-            sendinblueContactAttributes.map((a) => a.name),
-            metabaseDetailedQuestion.result_metadata.map((a) => a.name)
-          );
-
-          console.log('metabaseContactsList', metabaseContactsList);
-
-          const metabaseAttributesTypesWithSendinblueFormat =
-            fromMetabaseToSendinblueAttributesTypes(metabaseDetailedQuestion);
-
-          // since the sendinblue attributes are shared between list
-          // we won't remove the sendinblue attributes that don't appear in the metabase question
-          // because they might be used in other sendinblue contacts lists
-
-          // return mapSeries(diffContactsAttributes.added, (addedAttribute) => {
-          //   console.log(typeof metabaseContactsList[attributeType]);
-          //   sendinblueClient.createContactAttribute(addedAttribute);
-          // });
-
-          // sendinblueClient.createContactAttributes(diffContactsAttributes.added);
-
-          // const diffContactsLists = diff(metabaseContactsList, sendinblueContactsList, 'email');
+      return (
+        sendinblueTargetedList
+          ? Promise.resolve(sendinblueTargetedList.id)
+          : // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
+            createSendinblueContactLists(metabaseQuestion)
+      ).then((sendinblueListId) => {
+        // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
+        // here we only sync their names & types, not the values they'll have for each contact
+        return syncAvailableAttributes(metabaseQuestion).then((sendinblueAttributesFromMetabase) => {
+          return Promise.all([
+            metabaseClient.runQuestion(metabaseQuestion.id),
+            sendinblueClient.fetchContactsFromList(sendinblueListId)
+          ]).then(([metabaseContacts, sendinblueContacts]) => {
+            // 4. ...create contacts on metabase question but not in sendinblue list
+            //  and remove contacts not on metabase question but in sendinblue list
+            return syncContacts(sendinblueListId, metabaseContacts, sendinblueContacts).then(() => {
+              // 5. ...update the attributes values on sendinblue contacts to match the
+              // values fetched from metabase question
+              return syncContactAttributesValues(metabaseContacts, sendinblueAttributesFromMetabase);
+            });
+          });
         });
       });
     });
   });
 }
-
-main();
-// // Fetching contact lists from metabase
-// logger.info('fetching contacts from metabase...');
-
-// // Fetching contact lists from sendinblue
-// logger.info('fetching contact lists from sendinblue...');
-// const sendinblueContactLists = await sendinblueClient.fetchLists();
-
-// // Compute contact lists presents in Metabase but missing in Sendinblue
-// const missingListsInSendInBlue = ArrayUtils.elementsNotInArray(metabaseContactLists, sendinblueContactLists, 'name');
-
-// // Create missing contact lists in SendInBlue
-// if (missingListsInSendInBlue.length > 0) {
-//     logger.info(`creating ${missingListsInSendInBlue.length} (missing) list(s) in sendinblue`, {lists: missingListsInSendInBlue});
-//     await sendinblueClient.createContactLists(missingListsInSendInBlue.map((list) => list.name));
-// }
-
-// logger.info(`${metabaseContactLists.length} list(s) to synchronize`);
-
-// // Compute contact lists presents in SendInBlue but missing in Metabase, log purpose only
-// const missingListsInMetabase = ArrayUtils.elementsNotInArray(sendinblueContactLists, metabaseContactLists, 'name');
-// missingListsInMetabase.length > 0 && logger.warn(`following list are missing in Metabase: ${missingListsInMetabase.map((list) => list.name).join(', ')}`);
-
-// /**
-//  * CONTACT ATTRIBUTES
-//  *
-//  * Getting contact attributes from both Metabase and SendInBlue
-//  * Create missing lists in SendInBlue if necessary
-//  */
-
-// // Concat every Metabase list attributes
-// // Take the first contact of every list and get its attributes
-// logger.info('concatenating contact attributes from metabase...');
-// const metabaseContactAttributes = metabaseContactLists.flatMap(({contacts}) => Object.keys(contacts[0] ?? {}));
-// const distinctMetabaseContactAttributes = uniq(metabaseContactAttributes).map((attribute) => attribute.toUpperCase());
-
-// // Fetch sendinblue contact attributes
-// logger.info('fetching contact attributes from sendinblue...');
-// const sendinblueContactAttributes = ['EMAIL', ...(await sendinblueClient.fetchContactAttributes())];
-
-// // Identify attributes to create
-// const missingAttributesInSendinblue = ArrayUtils.elementsNotInArray(metabaseContactAttributes, sendinblueContactAttributes);
-
-// // Create missing contact attributes in SendInBlue
-// if (missingAttributesInSendinblue.length > 0) {
-//     logger.info(`creating ${missingAttributesInSendinblue.length} (missing) attribute(s) in sendinblue`, {attributes: missingAttributesInSendinblue});
-//     await sendinblueClient.createContactAttributes(missingAttributesInSendinblue);
-// }
-
-// /**
-//  * SYNCHRONIZE CONTACTS
-//  */
-
-// // TODO: (Optional) Specific to cometmedias: some emails need to be cleaned before import
-// // TODO: (Optional) Identify which contacts to add / delete (we could just bulk delete and bulk create)
-// // TODO: (Required) Update lists
-
-// if (config.betteruptime.heartbeatUrl) {
-//     logger.info('sending heartbeat to BetterUpTime');
-//     await axios.get(config.betteruptime.heartbeatUrl);
-// }
-
-// return response.send(201);
-// }

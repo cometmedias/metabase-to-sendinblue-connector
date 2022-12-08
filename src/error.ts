@@ -4,7 +4,7 @@ export class ConnectorError extends Error {
   constructor(message: any, previousError: any = {}, public status: number = 500) {
     super(message);
     Error.captureStackTrace(this, this.constructor);
-    this.message = `${message}${previousError.message ? `: ${previousError.message}` : ''}`;
+    this.message = `${message}${previousError.message ? `: ${previousError.message}` : JSON.stringify(previousError)}`;
   }
 }
 

@@ -17,3 +17,16 @@ export function diff<T, U>(firstArray: T[], secondArray: U[], key?: string): {ad
     removed: firstArray.filter((el: any) => !secondArraySet.has(getValue(el, key)))
   };
 }
+
+export function filterObjectKeys(
+  object: Record<string, any>,
+  predicate: (key: any, value: any) => boolean
+): Record<string, any> {
+  return Object.keys(object).reduce((acc: Record<string, any>, key) => {
+    const value = object[key];
+    if (predicate(key, value)) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}

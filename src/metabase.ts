@@ -1,17 +1,17 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
-import {Promise} from 'bluebird';
+import {delay, Promise} from 'bluebird';
 import {config} from './config';
 
-export interface MetabaseConfig {
+export type MetabaseConfig = {
   host: string;
   username: string;
   password: any;
   collectionId: number;
-}
+};
 
-export interface Question {
+export type MetabaseQuestion = {
   id: 1;
   collection_position: number | null;
   collection_preview: boolean;
@@ -29,31 +29,33 @@ export interface Question {
     email: string;
     timestamp: string;
   };
-}
+};
 
-export interface DetailedQuestion {
+export type MetabaseAttributes = {
+  description: string | null;
+  semantic_type: string | null;
+  unit?: string;
+  coercion_strategy: string | null;
+  name: string;
+  settings: string | null;
+  field_ref: any[];
+  effective_type: string;
+  id: number;
+  visibility_type: string;
+  display_name: string;
+  fingerprint: {
+    global: any;
+    type?: any;
+  } | null;
+  base_type: string;
+};
+
+export type DetailedQuestion = {
   description: string;
   archived: boolean;
   collection_position: number | null;
   table_id: 42;
-  result_metadata: {
-    description: string | null;
-    semantic_type: string | null;
-    unit?: string;
-    coercion_strategy: string | null;
-    name: string;
-    settings: string | null;
-    field_ref: any[];
-    effective_type: string;
-    id: number;
-    visibility_type: string;
-    display_name: string;
-    fingerprint: {
-      global: any;
-      type?: any;
-    } | null;
-    base_type: string;
-  }[];
+  result_metadata: MetabaseAttributes[];
   creator: {
     email: string;
     first_name: string;
@@ -121,23 +123,23 @@ export interface DetailedQuestion {
   dataset: boolean;
   created_at: string;
   public_uuid: string | null;
-}
+};
 
-export interface Contact {
+export type MetabaseContact = {
   email: string;
   [additionalProperties: string]: string | number | boolean;
-}
+};
 
-export interface MetabaseContactList extends Question {
-  contacts: Contact[];
-}
+export type MetabaseContactList = MetabaseQuestion & {
+  contacts: MetabaseContact[];
+};
 
 export class MetabaseClient {
   private token: string | null = null;
 
   constructor(private config: MetabaseConfig) {}
 
-  private async makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
+  private async makeRequest(axiosConfig: AxiosRequestConfig, retries = 0): Promise<AxiosResponse> {
     logger.info(`making request on metabase: ${JSON.stringify(axiosConfig)}`);
     return (this.token ? Promise.resolve() : this.authenticate())
       .then(() => {
@@ -149,12 +151,18 @@ export class MetabaseClient {
           }
         });
       })
-      .catch(onAxiosError('cannot make request on metabase'));
+      .catch(onAxiosError('cannot make request on metabase'))
+      .catch((error) => {
+        if (retries > 5) {
+          throw error;
+        }
+        return delay(retries * 1000).then(() => this.makeRequest(axiosConfig, retries + 1));
+      });
   }
 
   // https://www.metabase.com/docs/latest/api/session.html#post-apisession
   private async authenticate(): Promise<void> {
-    console.log(this.config.host);
+    logger.info(`authenticating on metabase on ${this.config.host}`);
     return axios({
       method: 'POST',
       url: `${this.config.host}/api/session`,
@@ -162,33 +170,38 @@ export class MetabaseClient {
         username: this.config.username,
         password: this.config.password
       }
-    }).then((res) => {
-      this.token = res.data.id;
-    });
+    })
+      .then((res) => {
+        this.token = res.data.id;
+      })
+      .catch(onError('could not authenticate on metabase'));
   }
 
   // https://www.metabase.com/docs/latest/api/card#get-apicard
-  public async fetchQuestionsFromCollection(collectionId: number): Promise<Question[]> {
+  public async fetchQuestionsFromCollection(collectionId: number): Promise<MetabaseQuestion[]> {
+    logger.info(`fetching metabase questions from collection ${collectionId}`);
     return this.makeRequest({
       method: 'GET',
       url: `${this.config.host}/api/collection/${collectionId}/items?models=card`
     })
-      .then((response) => response.data.data as Question[])
+      .then((response) => response.data.data as MetabaseQuestion[])
       .catch(onError("cannot fetch sendinblue's questions on metabase"));
   }
 
   // // https://www.metabase.com/docs/latest/api/card#get-apicard
-  public async fetchQuestion(id: number): Promise<DetailedQuestion> {
+  public async fetchQuestion(questionId: number): Promise<DetailedQuestion> {
+    logger.info(`fetching metabase details of question ${questionId}`);
     return this.makeRequest({
       method: 'GET',
-      url: `${this.config.host}/api/card/${id}`
+      url: `${this.config.host}/api/card/${questionId}`
     })
       .then((response) => response.data as DetailedQuestion)
-      .catch(onError(`cannot fetch sendinblue's question ${id} on metabase`));
+      .catch(onError(`cannot fetch sendinblue's question ${questionId} on metabase`));
   }
 
   // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
-  public async runQuestion(questionId: number): Promise<Contact[]> {
+  public async runQuestion(questionId: number): Promise<MetabaseContact[]> {
+    logger.info(`running metabase question ${questionId}`);
     return this.makeRequest({
       method: 'POST',
       url: `${this.config.host}/api/card/${questionId}/query`
@@ -205,14 +218,10 @@ export class MetabaseClient {
       .catch(onError(`cannot run question ${questionId} on metabase`));
   }
 
-  public async fetchContactLists(questions: Question[]): Promise<MetabaseContactList[]> {
-    return Promise.map<Question, MetabaseContactList>(questions, async (question: Question) => ({
+  public async fetchContactLists(questions: MetabaseQuestion[]): Promise<MetabaseContactList[]> {
+    return Promise.map<MetabaseQuestion, MetabaseContactList>(questions, async (question: MetabaseQuestion) => ({
       ...question,
       contacts: await this.runQuestion(question.id)
     }));
   }
 }
-
-new MetabaseClient(config.metabase).fetchQuestion(1).then((res) => {
-  console.log('res', JSON.stringify(res, null, 2));
-});

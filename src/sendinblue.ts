@@ -1,19 +1,20 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
-import {Promise} from 'bluebird';
+import {delay, Promise} from 'bluebird';
+import {chunk} from 'lodash';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
-import {Contact} from './metabase';
+import {MetabaseContact} from './metabase';
 
-export interface SendinblueContactList {
+export type SendinblueContactList = {
   id: number;
   name: string;
   folderId: 1;
   uniqueSubscribers: number;
   totalBlacklisted: number;
   totalSubscribers: number;
-}
+};
 
-interface SendinblueContact {
+export type SendinblueContact = {
   email: string;
   id: number;
   emailBlacklisted: boolean;
@@ -22,62 +23,58 @@ interface SendinblueContact {
   modifiedAt: string;
   listIds: number[];
   attributes: Record<string, any>;
-}
+};
 
-interface ContactAttributes {
+type SendinblueContactCreatePayload = Partial<Omit<SendinblueContact, 'id' | 'createdAt' | 'modifiedAt'>>;
+
+type SendinblueContactUpdatePayload = Partial<SendinblueContactCreatePayload> & {
+  unlinkListIds?: number[];
+};
+
+type ContactAttributes = {
   name: string;
   category: string;
   type: string;
   calculatedValue: string;
-}
+};
 
-function formatEmail(email: string): string {
-  // "fanny_michaud2000@yahoo.fr / fanny.michaud@nantesmetropole.fr"
-  // "eduval@@kalelia.fr"
-  // "caroline.pelletier31@gmail.com "
-  return email.split('/')[0]!.replace('@@', '@').replace(' ', '');
-}
-
-// function formatAttributes(contact) {
-//     return {
-//         ...Object.fromEntries(attributes.map((attribute) => [attribute, contact[attribute]])),
-//         email: formatEmail(contact.EMAIL)
-//     };
-// }
-
-// function formatContacts(listId) {
-//     return (contacts) =>
-//         contacts.map((contact) => ({
-//             email: formatEmail(contact.EMAIL),
-//             attributes: formatAttributes(contact),
-//             listIds: [listId],
-//             updateEnabled: true
-//         }));
-// }
-
-export interface SendinblueConfig {
+export type SendinblueConfig = {
   baseUrl: string;
   apiKey: any;
   folderId: number;
   attributeCategory: string;
-}
+};
 
 export class SendinblueClient {
   constructor(private config: SendinblueConfig) {}
 
-  private async makeRequest(axiosConfig: AxiosRequestConfig): Promise<AxiosResponse> {
-    logger.info(`making request on sendinblue: ${JSON.stringify(axiosConfig)}`);
+  private makeRequest(axiosConfig: AxiosRequestConfig, retries = 0): Promise<AxiosResponse> {
+    logger.info(
+      `${retries > 0 ? `(retry ${retries}) ` : ''}making request on sendinblue: ${JSON.stringify(axiosConfig)}`
+    );
     return axios({
       ...axiosConfig,
       headers: {
         ...axiosConfig.headers,
         'api-key': this.config.apiKey
       }
-    }).catch(onAxiosError('cannot make request on sendinblue'));
+    })
+      .catch(onAxiosError('cannot make request on sendinblue'))
+      .catch((error) => {
+        if (error.status === 400) {
+          throw error;
+        }
+        logger.error(`error making request to sendinblue: ${error}`);
+        if (retries > 5) {
+          throw error;
+        }
+        return delay(retries * 1000).then(() => this.makeRequest(axiosConfig, retries + 1));
+      });
   }
 
   // https://developers.sendinblue.com/reference/getlists-1
-  public async fetchListsOfFolder(folderId: number): Promise<SendinblueContactList[]> {
+  public fetchListsOfFolder(folderId: number): Promise<SendinblueContactList[]> {
+    logger.info(`fetching sendinblue lists of folder ${folderId}`);
     return this.makeRequest({
       method: 'GET',
       url: `${this.config.baseUrl}/contacts/folders/${folderId}/lists`
@@ -87,7 +84,8 @@ export class SendinblueClient {
   }
 
   // https://developers.sendinblue.com/reference/createlist-1
-  public async createContactList(listName: string, folderId: number): Promise<{id: number}> {
+  public createContactList(listName: string, folderId: number): Promise<{id: number}> {
+    logger.info(`create sendinblue contact list ${listName} of folder ${folderId}`);
     return this.makeRequest({
       method: 'POST',
       url: `${this.config.baseUrl}/contacts/lists`,
@@ -102,16 +100,36 @@ export class SendinblueClient {
 
   // https://developers.sendinblue.com/reference/getcontactsfromlist
   public fetchContactsFromList(listId: number): Promise<SendinblueContact[]> {
-    return this.makeRequest({
-      method: 'GET',
-      url: `${this.config.baseUrl}/contacts/lists/${listId}/contacts`
-    })
-      .then((response) => response.data as SendinblueContact[])
-      .catch(onError(`cannot fetch contacts from list: ${listId}`));
+    const fetchChunk = (
+      acc: SendinblueContact[] = [],
+      offset: number = 0,
+      limit: number = 500
+    ): Promise<SendinblueContact[]> => {
+      logger.info(`fetching sendinblue contacts from list ${listId}, offset ${offset} limit ${limit}`);
+      return this.makeRequest({
+        method: 'GET',
+        url: `${this.config.baseUrl}/contacts/lists/${listId}/contacts`,
+        params: {
+          limit,
+          offset
+        }
+      })
+        .then((response) => {
+          const contacts = response.data.contacts as SendinblueContact[];
+          const newAcc = acc.concat(contacts);
+          if (contacts.length < limit) {
+            return newAcc;
+          }
+          return fetchChunk(newAcc, offset + limit, limit);
+        })
+        .catch(onError(`cannot fetch contacts from list: ${listId}`));
+    };
+    return fetchChunk();
   }
 
   // https://developers.sendinblue.com/reference/getattributes-1
-  public async fetchContactAttributes(): Promise<ContactAttributes[]> {
+  public fetchContactAttributes(): Promise<ContactAttributes[]> {
+    logger.info(`fetching sendinblue contacts attributes`);
     return this.makeRequest({
       method: 'GET',
       url: `${this.config.baseUrl}/contacts/attributes`
@@ -121,62 +139,49 @@ export class SendinblueClient {
   }
 
   // https://developers.sendinblue.com/reference/createattribute-1
-  public async createContactAttribute(
-    attributeName: string,
-    attributeType: string,
-    category = 'normal'
-  ): Promise<void> {
-    await this.makeRequest({
+  public createContactAttribute(attributeName: string, attributeType: string, category = 'normal'): Promise<void> {
+    logger.info(`create sendinblue contacts attribute ${attributeName} of type ${attributeType}`);
+    return this.makeRequest({
       method: 'POST',
       url: `${this.config.baseUrl}/contacts/attributes/${category}/${attributeName}`,
       data: {
         type: attributeType
       }
-    }).catch(onError(`cannot create contact attribute on sendinblue, attributeName : ${attributeName}`));
+    })
+      .then(() => {})
+      .catch(onError(`cannot create contact attribute on sendinblue, attributeName: ${attributeName}`));
+  }
+
+  // https://developers.sendinblue.com/reference/createcontact
+  public upsertContact(payload: SendinblueContactCreatePayload) {
+    logger.info(`create sendinblue contact ${payload.email} belonging to list ${payload.listIds}`);
+    return this.makeRequest({
+      method: 'POST',
+      url: `${this.config.baseUrl}/contacts`,
+      data: payload
+    })
+      .then(() => {})
+      .catch((error) => {
+        if (error.response.data.code === 'duplicate_parameter') {
+          return this.updateContacts([payload]);
+        }
+        return onError(`couldn't create sendinblue contact ${payload.email}`, error.response.status)(error);
+      });
   }
 
   // https://developers.sendinblue.com/reference/updatebatchcontacts
-  public async updateContacts(contacts: Contact[]) {
-    // return this.makeRequest({
-    //     method: 'POST',
-    //     url: `${this.config.baseUrl}/contacts/batch`,
-    //     data: {
-    //         contacts: contacts.map((contact) => {
-    //             return {
-    //                 ...contact,
-    //                 listIds: [this.config.listId]
-    //             };
-    //         })
-    //     }
-    // }).catch(onError(`cannot update contacts on list ${this.config.listId} on sendinblue`));
+  public async updateContacts(contacts: SendinblueContactUpdatePayload[]) {
+    const contactsChunks = chunk(contacts, 500);
+    const totalChunks = contactsChunks.length;
+    return Promise.mapSeries(contactsChunks, (contactsChunk, i) => {
+      logger.info(`updating sendinblue contacts, chunk ${i + 1}/${totalChunks}`);
+      return this.makeRequest({
+        method: 'POST',
+        url: `${this.config.baseUrl}/contacts/batch`,
+        data: {
+          contacts: contactsChunk
+        }
+      }).catch(onError(`cannot update contacts chunk ${i + 1}/${totalChunks} on sendinblue`));
+    });
   }
-
-  // public async deleteContacts(contacts: any[]) {
-  //     try {
-  //         logger.info(`Deleting ${contacts.length} contacts`);
-  //         await forEachAsync(contacts, async (contact) => {
-  //             try {
-  //                 await axios.delete(`https://api.sendinblue.com/v3/contacts/${contact.email}`, headers);
-  //             } catch (error) {
-  //                 // Ignore users not found
-  //                 if (error.response.status !== 404) throw error;
-  //             }
-  //         });
-  //         logger.info(`${contacts.length} contacts deleted successfully`);
-  //     } catch (error) {
-  //         console.error(error);
-  //         throw new Error('An error occurred while deleting contacts in sendinblue', error);
-  //     }
-  // }
 }
-
-// new Sendinblue(config.sendinblue)
-//     .updateContacts([
-//         {
-//             email: 'baumier.romain@gmail.com',
-//             attributes: {}
-//         }
-//     ])
-//     .then((res) => {
-//         console.log('res', res);
-//     });
