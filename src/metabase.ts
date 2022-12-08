@@ -36,27 +36,24 @@ export interface DetailedQuestion {
   archived: boolean;
   collection_position: number | null;
   table_id: 42;
-  result_metadata: [
-    {
-      description: string | null;
-      semantic_type: string;
-      coercion_strategy: string | null;
-      name: string;
-      settings: string | null;
-      field_ref: any[];
-      effective_type: string;
-      id: number;
-      visibility_type: string;
-      display_name: string;
-      fingerprint: {
-        global: {
-          'distinct-count': number;
-          'nil%': number;
-        };
-      };
-      base_type: string;
-    }
-  ];
+  result_metadata: {
+    description: string | null;
+    semantic_type: string | null;
+    unit?: string;
+    coercion_strategy: string | null;
+    name: string;
+    settings: string | null;
+    field_ref: any[];
+    effective_type: string;
+    id: number;
+    visibility_type: string;
+    display_name: string;
+    fingerprint: {
+      global: any;
+      type?: any;
+    } | null;
+    base_type: string;
+  }[];
   creator: {
     email: string;
     first_name: string;

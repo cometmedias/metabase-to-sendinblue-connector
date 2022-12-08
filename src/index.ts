@@ -22,8 +22,37 @@ const metabaseClient = new MetabaseClient(config.metabase);
  * Create missing lists in SendInBlue if necessary
  */
 
-function extractContactAttributesTypes(metabaseQuestion: DetailedQuestion): Record<string, string> {
-  // @TODO
+function fromMetabaseToSendinblueAttributesTypes(metabaseQuestion: DetailedQuestion): Record<string, string> {
+  function toSendinblueAttributeType(metabaseType: string) {
+    // https://github.com/metabase/metabase/blob/f342fe17bd897dd4940a2c23a150a78202fa6b72/src/metabase/driver/postgres.clj#LL568C29-L581C64
+    switch (metabaseType) {
+      case 'type/Boolean':
+        return 'boolean';
+
+      case 'type/Date':
+      case 'type/DateTime':
+      case 'type/DateTimeWithTZ':
+      case 'type/DateTimeWithLocalTZ':
+      case 'type/Time':
+      case 'type/TimeWithTZ':
+        return 'date';
+
+      case 'type/Decimal':
+      case 'type/Float':
+      case 'type/Integer':
+        return 'float';
+
+      case 'type/IPAddress':
+      case 'type/Text':
+      case 'type/UUID':
+      default:
+        return 'text';
+    }
+  }
+  return metabaseQuestion.result_metadata.reduce((acc: Record<string, string>, attribute) => {
+    acc[attribute.name] = toSendinblueAttributeType(attribute.base_type);
+    return acc;
+  }, {});
 }
 
 function main() {
@@ -62,20 +91,23 @@ function main() {
             metabaseDetailedQuestion.result_metadata.map((a) => a.name)
           );
 
-          const metabaseAttributesTypes = extractContactAttributesTypes(metabaseContactsList);
+          console.log('metabaseContactsList', metabaseContactsList);
+
+          const metabaseAttributesTypesWithSendinblueFormat =
+            fromMetabaseToSendinblueAttributesTypes(metabaseDetailedQuestion);
 
           // since the sendinblue attributes are shared between list
           // we won't remove the sendinblue attributes that don't appear in the metabase question
           // because they might be used in other sendinblue contacts lists
 
-          return mapSeries(diffContactsAttributes.added, (addedAttribute) => {
-            console.log(typeof metabaseContactsList[attributeType]);
-            sendinblueClient.createContactAttribute(addedAttribute);
-          });
+          // return mapSeries(diffContactsAttributes.added, (addedAttribute) => {
+          //   console.log(typeof metabaseContactsList[attributeType]);
+          //   sendinblueClient.createContactAttribute(addedAttribute);
+          // });
 
-          sendinblueClient.createContactAttributes(diffContactsAttributes.added);
+          // sendinblueClient.createContactAttributes(diffContactsAttributes.added);
 
-          const diffContactsLists = diff(metabaseContactsList, sendinblueContactsList, 'email');
+          // const diffContactsLists = diff(metabaseContactsList, sendinblueContactsList, 'email');
         });
       });
     });
