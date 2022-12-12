@@ -25,12 +25,15 @@ const defaultConfig: Config = {
     host: '',
     username: '',
     password: secureString,
-    collectionId: 0
+    collectionId: 0,
+    testCollectionId: 0,
+    testDatabaseId: 0
   },
   sendinblue: {
     baseUrl: 'https://api.sendinblue.com/v3',
     apiKey: secureString,
     folderId: 1,
+    testFolderId: 1,
     attributeCategory: 'normal'
   },
   betteruptime: {

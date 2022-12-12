@@ -1,18 +1,19 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
+import {delay, mapSeries, Promise} from 'bluebird';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
-import {delay, Promise} from 'bluebird';
-import {config} from './config';
 
 export type MetabaseConfig = {
   host: string;
   username: string;
   password: any;
   collectionId: number;
+  testCollectionId: number;
+  testDatabaseId: number;
 };
 
 export type MetabaseQuestion = {
-  id: 1;
+  id: number;
   collection_position: number | null;
   collection_preview: boolean;
   description: string;
@@ -31,7 +32,22 @@ export type MetabaseQuestion = {
   };
 };
 
-export type MetabaseAttributes = {
+export type MetabaseAvailableAttributeTypes =
+  | 'type/Boolean'
+  | 'type/Date'
+  | 'type/DateTime'
+  | 'type/DateTimeWithTZ'
+  | 'type/DateTimeWithLocalTZ'
+  | 'type/Decimal'
+  | 'type/Float'
+  | 'type/Integer'
+  | 'type/Time'
+  | 'type/TimeWithTZ'
+  | 'type/Text'
+  | 'type/IPAddress'
+  | 'type/UUID';
+
+export type MetabaseAttribute = {
   description: string | null;
   semantic_type: string | null;
   unit?: string;
@@ -47,15 +63,15 @@ export type MetabaseAttributes = {
     global: any;
     type?: any;
   } | null;
-  base_type: string;
+  base_type: MetabaseAvailableAttributeTypes;
 };
 
-export type DetailedQuestion = {
+export type MetabaseDetailedQuestion = {
   description: string;
   archived: boolean;
   collection_position: number | null;
-  table_id: 42;
-  result_metadata: MetabaseAttributes[];
+  table_id: number;
+  result_metadata: MetabaseAttribute[];
   creator: {
     email: string;
     first_name: string;
@@ -84,9 +100,13 @@ export type DetailedQuestion = {
   cache_ttl: null;
   dataset_query: {
     database: number;
-    query: {
+    query?: {
       'source-table': number;
       filter: any[];
+    } | null;
+    native?: {
+      query: string;
+      'template-tags': any;
     };
     type: string;
   };
@@ -103,8 +123,8 @@ export type DetailedQuestion = {
     timestamp: string;
   };
   visualization_settings: {
-    'table.pivot_column': string;
-    'table.cell_column': string;
+    'table.pivot_column'?: string;
+    'table.cell_column'?: string;
   };
   collection: {
     authority_level: null;
@@ -125,6 +145,12 @@ export type DetailedQuestion = {
   public_uuid: string | null;
 };
 
+export type MetabaseCreateQuestionPayload =
+  // these fields are required
+  Pick<MetabaseDetailedQuestion, 'name' | 'dataset_query' | 'collection_id' | 'visualization_settings' | 'display'> &
+    // and these ones are optional
+    Partial<Pick<MetabaseDetailedQuestion, 'description' | 'parameters' | 'result_metadata'>>;
+
 export type MetabaseContact = {
   email: string;
   [additionalProperties: string]: string | number | boolean;
@@ -139,7 +165,7 @@ export class MetabaseClient {
 
   constructor(private config: MetabaseConfig) {}
 
-  private async makeRequest(axiosConfig: AxiosRequestConfig, retries = 0): Promise<AxiosResponse> {
+  private makeRequest(axiosConfig: AxiosRequestConfig, retries = 0): Promise<AxiosResponse> {
     logger.info(`making request on metabase: ${JSON.stringify(axiosConfig)}`);
     return (this.token ? Promise.resolve() : this.authenticate())
       .then(() => {
@@ -153,6 +179,11 @@ export class MetabaseClient {
       })
       .catch(onAxiosError('cannot make request on metabase'))
       .catch((error) => {
+        logger.error(`error making request to metabase: ${error}`);
+        // no need to retry when we have these errors
+        if (error.status >= 400 && error.status <= 404) {
+          throw error;
+        }
         if (retries > 5) {
           throw error;
         }
@@ -161,7 +192,7 @@ export class MetabaseClient {
   }
 
   // https://www.metabase.com/docs/latest/api/session.html#post-apisession
-  private async authenticate(): Promise<void> {
+  private authenticate(): Promise<void> {
     logger.info(`authenticating on metabase on ${this.config.host}`);
     return axios({
       method: 'POST',
@@ -178,7 +209,7 @@ export class MetabaseClient {
   }
 
   // https://www.metabase.com/docs/latest/api/card#get-apicard
-  public async fetchQuestionsFromCollection(collectionId: number): Promise<MetabaseQuestion[]> {
+  fetchQuestionsFromCollection(collectionId: number): Promise<MetabaseQuestion[]> {
     logger.info(`fetching metabase questions from collection ${collectionId}`);
     return this.makeRequest({
       method: 'GET',
@@ -189,18 +220,18 @@ export class MetabaseClient {
   }
 
   // // https://www.metabase.com/docs/latest/api/card#get-apicard
-  public async fetchQuestion(questionId: number): Promise<DetailedQuestion> {
+  fetchQuestion(questionId: number): Promise<MetabaseDetailedQuestion> {
     logger.info(`fetching metabase details of question ${questionId}`);
     return this.makeRequest({
       method: 'GET',
       url: `${this.config.host}/api/card/${questionId}`
     })
-      .then((response) => response.data as DetailedQuestion)
+      .then((response) => response.data as MetabaseDetailedQuestion)
       .catch(onError(`cannot fetch sendinblue's question ${questionId} on metabase`));
   }
 
   // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
-  public async runQuestion(questionId: number): Promise<MetabaseContact[]> {
+  runQuestion(questionId: number): Promise<MetabaseContact[]> {
     logger.info(`running metabase question ${questionId}`);
     return this.makeRequest({
       method: 'POST',
@@ -218,10 +249,42 @@ export class MetabaseClient {
       .catch(onError(`cannot run question ${questionId} on metabase`));
   }
 
-  public async fetchContactLists(questions: MetabaseQuestion[]): Promise<MetabaseContactList[]> {
-    return Promise.map<MetabaseQuestion, MetabaseContactList>(questions, async (question: MetabaseQuestion) => ({
-      ...question,
-      contacts: await this.runQuestion(question.id)
-    }));
+  // https://www.metabase.com/docs/latest/api/card#post-apicard
+  createQuestion(questionPayload: MetabaseCreateQuestionPayload): Promise<MetabaseDetailedQuestion> {
+    logger.info(`creating metabase question ${questionPayload.name}`);
+    return this.makeRequest({
+      method: 'POST',
+      url: `${this.config.host}/api/card`,
+      data: questionPayload
+    })
+      .then((response) => response.data as MetabaseDetailedQuestion)
+      .catch(onError(`cannot create question ${questionPayload.name} on metabase`));
+  }
+
+  // https://www.metabase.com/docs/latest/api/card#post-apicard
+  removeQuestion(questionId: number): Promise<void> {
+    logger.info(`removing metabase question ${questionId}`);
+    return (
+      this.makeRequest({
+        method: 'DELETE',
+        url: `${this.config.host}/api/card/${questionId}`
+      })
+        // res.data is empty
+        .then(() => {})
+        .catch(onError(`cannot remove question ${questionId} on metabase`))
+    );
+  }
+
+  // https://www.metabase.com/docs/latest/api/card#post-apicard
+  removeAllQuestionsOfCollection(collectionId: number): Promise<void> {
+    logger.info(`removing all metabase questions of collection ${collectionId}`);
+    return this.fetchQuestionsFromCollection(collectionId)
+      .then((questions) => {
+        return mapSeries(questions, (question) => {
+          return this.removeQuestion(question.id);
+        });
+      })
+      .then(() => {})
+      .catch(onError(`cannot all metabase questions of collection ${collectionId}`));
   }
 }
