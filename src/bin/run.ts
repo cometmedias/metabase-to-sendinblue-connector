@@ -40,5 +40,5 @@ syncAll(config.metabase.collectionId, config.sendinblue.folderId)
   })
   .catch((error) => {
     logger.error(error);
-    process.exit(0);
+    process.exit(1);
   });
