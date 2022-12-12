@@ -213,7 +213,7 @@ export function syncAll(
     metabase: new MetabaseClient(config.metabase)
   };
 
-  logger.info('fetching questions from metabase...');
+  logger.info('fetching questions from metabase and sendinblue contacts lists');
   return Promise.all([
     clients.sendinblue.fetchListsOfFolder(sendinblueFolderId),
     clients.metabase.fetchQuestionsFromCollection(metabaseCollectionId)
