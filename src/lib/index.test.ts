@@ -16,7 +16,7 @@ import {
   MetabaseDetailedQuestion,
   MetabaseQuestion
 } from './metabase';
-import {SendinblueClient, SendinblueContactList} from './sendinblue';
+import {SendinblueClient} from './sendinblue';
 
 function getMetabaseQuestion(id: number, name: string): MetabaseQuestion {
   return {
@@ -155,8 +155,6 @@ describe('tests metabase to sendinblue connector', () => {
   });
 
   describe('create a sendinblue contacts list (createSendinblueContactLists)', () => {
-    let listId: number;
-
     afterEach(() => {
       return cleanFolderAndCollection(clients);
     });
@@ -165,7 +163,6 @@ describe('tests metabase to sendinblue connector', () => {
       const folderId = config.sendinblue.testFolderId;
       return createSendinblueContactLists(clients, getMetabaseQuestion(101, 'Metabase test question'), folderId).then(
         (createdListId) => {
-          listId = createdListId;
           expect(createdListId).toEqual(expect.any(Number));
           return clients.sendinblue.fetchListsOfFolder(folderId).then((lists) => {
             const createdContactList = find(lists, {id: createdListId});
@@ -207,23 +204,18 @@ describe('tests metabase to sendinblue connector', () => {
     });
 
     afterEach(() => {
-      logger.info('executing after each');
       const attributesToRemove = [sendinblueExistingAttributeName, ...metabaseAttributesNames];
       return Promise.all([
         cleanFolderAndCollection(clients),
         mapSeries(attributesToRemove, (attributeName) => {
-          return clients.sendinblue.removeContactAttribute(attributeName).catch((error) => {
-            if (error.status !== 404) {
-              throw error;
-            }
-          });
+          return clients.sendinblue.removeContactAttribute(attributeName);
         })
       ]);
     });
 
     it('should sync attributes', () => {
       if (!metabaseTestQuestion) {
-        return Promise.reject();
+        throw new Error('no metabaseTestQuestion, beforeEach() went wrong');
       }
       // we first add an attribute on sendinblue (that is not present in metabase -> we want to ensure it'll be deleted)
       return clients.sendinblue
@@ -293,7 +285,7 @@ describe('tests metabase to sendinblue connector', () => {
             values
             ('contact1@hey.com', 'blue', '2022-11-03 16:02:12.056659+0'::timestamptz),
             ('contact2@hey.com', 'red', '2022-12-09 17:32:12.056659+0'::timestamptz)
-          ) as q ("email", "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR", "TEST-ALL-DO-NOT-REMOVE-CREATEDAT")
+          ) as q ("email", "${testPrefix}-FAVORITE-COLOR", "${testPrefix}-CREATEDAT")
       `
         ).then((createdQuestion) => {
           metabaseTestQuestion = createdQuestion;
@@ -302,17 +294,12 @@ describe('tests metabase to sendinblue connector', () => {
     });
 
     afterEach(() => {
-      logger.info('executing after each');
       const attributesToRemove = [sendinblueExistingAttributeName, ...metabaseAttributesNames];
       return Promise.all([
         cleanFolderAndCollection(clients),
         // remove the test attributes on sendinblue
         mapSeries(attributesToRemove, (attributeName) => {
-          return clients.sendinblue.removeContactAttribute(attributeName).catch((error) => {
-            if (error.status !== 404) {
-              throw error;
-            }
-          });
+          return clients.sendinblue.removeContactAttribute(attributeName);
         })
       ]);
     });
@@ -321,13 +308,9 @@ describe('tests metabase to sendinblue connector', () => {
       if (!metabaseTestQuestion) {
         throw new Error('no metabaseTestQuestion, beforeEach() went wrong');
       }
-      // we first add an attribute on sendinblue (that is not present in metabase -> we want to ensure it'll be deleted)
       return clients.sendinblue
         .createContactAttribute(sendinblueExistingAttributeName, 'text')
-        .then(() => {
-          // then we sync the attributes from metabase to sendinblue
-          return syncAll(config.metabase.testCollectionId, config.sendinblue.testFolderId);
-        })
+        .then(() => syncAll(config.metabase.testCollectionId, config.sendinblue.testFolderId))
         .then((syncOutput) => {
           expect(syncOutput).toMatchInlineSnapshot(`
 [
