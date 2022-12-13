@@ -7,8 +7,8 @@ module "metabase_to_sendinblue_connector" {
   description = "Synchronize Metabase views with SendInBlue contact lists"
   runtime     = "nodejs16"
   entrypoint  = "metabaseToSendInBlueConnector"
-  source_dir  = "../src"
-  output_path = "../build"
+  source_dir  = "../dist"
+  output_path = "../dist"
   excludes    = ["node_modules", ".env", ".env.dist"]
 
   environment_variables        = var.environment_variables

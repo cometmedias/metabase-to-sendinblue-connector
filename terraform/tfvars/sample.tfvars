@@ -6,11 +6,14 @@ environment_variables = {
   METABASE_HOST     = ""
   METABASE_USERNAME = ""
 
+  # SendInBlue
+  SENDINBLUE_BASEURL = ""
+
   # Better Uptime
-  BETTER_UPTIME_HEARTBEAT_URL = ""
+  BETTERUPTIME_HEARTBEATURL = ""
 }
 
 secret_environment_variables = {
-  METABASE_PASSWORD  = ""
-  SENDINBLUE_API_KEY = ""
+  METABASE_PASSWORD = ""
+  SENDINBLUE_APIKEY = ""
 }
