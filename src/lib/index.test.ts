@@ -235,7 +235,7 @@ describe('tests metabase to sendinblue connector', () => {
 
             // the attributes that were on metabase but not sendinblue should have been created,
             // and thus are present here:
-            expect(attributesFromMetabase).toMatchInlineSnapshot(`
+            expect(attributesFromMetabase.sort((a, z) => z.name.localeCompare(a.name))).toMatchInlineSnapshot(`
   [
     {
       "category": "normal",

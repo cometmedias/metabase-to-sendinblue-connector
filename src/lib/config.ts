@@ -41,7 +41,8 @@ const defaultConfig: configWithNamespace = {
       apiKey: secureString,
       folderId: 1,
       testFolderId: 1,
-      attributeCategory: 'normal'
+      attributeCategory: 'normal',
+      requestsConcurrency: 10
     },
     betteruptime: {
       heartbeatUrl: ''

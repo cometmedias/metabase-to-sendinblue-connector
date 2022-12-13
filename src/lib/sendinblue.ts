@@ -1,5 +1,5 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
-import {delay, Promise, mapSeries} from 'bluebird';
+import {delay, Promise, map} from 'bluebird';
 import {chunk} from 'lodash';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
@@ -45,6 +45,7 @@ export type SendinblueConfig = {
   folderId: number;
   testFolderId: number;
   attributeCategory: string;
+  requestsConcurrency: number;
 };
 
 export class SendinblueClient {
@@ -125,9 +126,13 @@ export class SendinblueClient {
     logger.info(`removing all sendinblue contact list of folder ${folderId}`);
     return this.fetchListsOfFolder(folderId)
       .then((lists) => {
-        return mapSeries(lists, (list) => {
-          this.removeContactList(list.id);
-        });
+        return map(
+          lists,
+          (list) => {
+            this.removeContactList(list.id);
+          },
+          {concurrency: this.config.requestsConcurrency}
+        );
       })
       .then(() => {})
       .catch(onError(`cannot remove all contact lists from folder ${folderId} on sendinblue`));
@@ -234,16 +239,20 @@ export class SendinblueClient {
   updateContacts(contacts: SendinblueContactUpdatePayload[]): Promise<void> {
     const contactsChunks = chunk(contacts, 500);
     const totalChunks = contactsChunks.length;
-    return Promise.mapSeries(contactsChunks, (contactsChunk, i) => {
-      logger.info(`updating sendinblue contacts, chunk ${i + 1}/${totalChunks}`);
-      return this.makeRequest({
-        method: 'POST',
-        url: `${this.config.baseUrl}/contacts/batch`,
-        data: {
-          contacts: contactsChunk
-        }
-        // res.data is empty, nothing returned from sendinblue
-      }).catch(onError(`cannot update contacts chunk ${i + 1}/${totalChunks} on sendinblue`));
-    }).then(() => {});
+    return Promise.map(
+      contactsChunks,
+      (contactsChunk, i) => {
+        logger.info(`updating sendinblue contacts, chunk ${i + 1}/${totalChunks}`);
+        return this.makeRequest({
+          method: 'POST',
+          url: `${this.config.baseUrl}/contacts/batch`,
+          data: {
+            contacts: contactsChunk
+          }
+          // res.data is empty, nothing returned from sendinblue
+        }).catch(onError(`cannot update contacts chunk ${i + 1}/${totalChunks} on sendinblue`));
+      },
+      {concurrency: this.config.requestsConcurrency}
+    ).then(() => {});
   }
 }

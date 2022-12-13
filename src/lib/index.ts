@@ -1,4 +1,4 @@
-import {mapSeries} from 'bluebird';
+import {map as mapP, mapSeries} from 'bluebird';
 import {identity, map, omit, pickBy} from 'lodash';
 import {config} from './config';
 import {onError} from './error';
@@ -126,9 +126,13 @@ export function syncAvailableAttributes(
     // since the sendinblue attributes are shared between list
     // we won't remove the sendinblue attributes that don't appear in the metabase question
     // because they might be used in other sendinblue contacts lists
-    return mapSeries(Object.entries(omit(sendinblueAttributesToCreate, 'email')), ([attributeName, {type}]) => {
-      return clients.sendinblue.createContactAttribute(attributeName, type);
-    }).then(() => sendinblueAttributesFromMetabase);
+    return mapP(
+      Object.entries(omit(sendinblueAttributesToCreate, 'email')),
+      ([attributeName, {type}]) => {
+        return clients.sendinblue.createContactAttribute(attributeName, type);
+      },
+      {concurrency: config.sendinblue.requestsConcurrency}
+    ).then(() => sendinblueAttributesFromMetabase);
   });
 }
 
@@ -144,28 +148,36 @@ export function syncContacts(
     'email'
   );
   return Promise.all([
-    mapSeries(contactsToCreateOnSendinblue, (contact) => {
-      // create or update contact (add it to sendinblue list)
-      return clients.sendinblue
-        .upsertContact({email: contact.email, listIds: [sendinblueListId]})
-        .catch((error) => {
-          logger.error(
-            `encountered an error creating contact ${contact.email} on ${sendinblueListId} sendinblue list (keep going for next contacts): ${error} ${error.stack}`
-          );
-        })
-        .then(() => contact);
-    }),
-    mapSeries(contactsToRemoveOnSendinblue, (contact) => {
-      // remove the contact from the current sendinblue list
-      return clients.sendinblue
-        .updateContacts([{email: contact.email, unlinkListIds: [sendinblueListId]}])
-        .catch((error) => {
-          logger.error(
-            `encountered an error removing contact ${contact.email} from ${sendinblueListId} sendinblue list (keep going for next contacts): ${error}`
-          );
-        })
-        .then(() => contact);
-    })
+    mapP(
+      contactsToCreateOnSendinblue,
+      (contact) => {
+        // create or update contact (add it to sendinblue list)
+        return clients.sendinblue
+          .upsertContact({email: contact.email, listIds: [sendinblueListId]})
+          .catch((error) => {
+            logger.error(
+              `encountered an error creating contact ${contact.email} on ${sendinblueListId} sendinblue list (keep going for next contacts): ${error} ${error.stack}`
+            );
+          })
+          .then(() => contact);
+      },
+      {concurrency: config.sendinblue.requestsConcurrency}
+    ),
+    mapP(
+      contactsToRemoveOnSendinblue,
+      (contact) => {
+        // remove the contact from the current sendinblue list
+        return clients.sendinblue
+          .updateContacts([{email: contact.email, unlinkListIds: [sendinblueListId]}])
+          .catch((error) => {
+            logger.error(
+              `encountered an error removing contact ${contact.email} from ${sendinblueListId} sendinblue list (keep going for next contacts): ${error}`
+            );
+          })
+          .then(() => contact);
+      },
+      {concurrency: config.sendinblue.requestsConcurrency}
+    )
   ]).then(([upsertedContacts, removedContacts]) => {
     return {
       upserted: upsertedContacts.filter(Boolean),
