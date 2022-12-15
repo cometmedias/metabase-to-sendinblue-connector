@@ -1,3 +1,4 @@
+import {AxiosRequestConfig} from 'axios';
 export class ConnectorError extends Error {
   name = 'ConnectorError';
 
@@ -14,12 +15,12 @@ export function onError(message: string, status?: number) {
   };
 }
 
-export function onAxiosError(message: string, status?: number) {
+export function onAxiosError(message: string, axiosConfig: AxiosRequestConfig) {
   return function catchError(error: any) {
     throw new ConnectorError(
-      `${message}: ${JSON.stringify(error.response?.data)}`,
+      `${message}: ${JSON.stringify(error.response?.data)}, sent: ${JSON.stringify(axiosConfig)}`,
       error,
-      status || error.response?.status
+      error.response?.status
     );
   };
 }

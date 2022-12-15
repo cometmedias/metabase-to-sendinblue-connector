@@ -1,14 +1,14 @@
 import {mapSeries} from 'bluebird';
-import {find, map} from 'lodash';
+import {find, map, pick} from 'lodash';
 import {
   createSendinblueContactLists,
   diff,
   fromMetabaseToSendinblueAttributesTypes,
   syncAll,
-  syncAvailableAttributes
+  syncAvailableAttributes,
+  syncContactWithAttributesValues
 } from './';
 import {config} from './config';
-import {logger} from './logger';
 import {
   MetabaseAttribute,
   MetabaseAvailableAttributeTypes,
@@ -16,7 +16,7 @@ import {
   MetabaseDetailedQuestion,
   MetabaseQuestion
 } from './metabase';
-import {SendinblueClient} from './sendinblue';
+import {SendinblueClient, SendinblueContact} from './sendinblue';
 
 function getMetabaseQuestion(id: number, name: string): MetabaseQuestion {
   return {
@@ -74,6 +74,10 @@ function createTestMetabaseQuestion(name: string, query: string) {
       database: config.metabase.testDatabaseId
     }
   });
+}
+
+function sortByEmail<T extends {email: string}>(a: T, z: T): number {
+  return a.email.localeCompare(z.email);
 }
 
 function cleanFolderAndCollection(clients: {sendinblue: SendinblueClient; metabase: MetabaseClient}) {
@@ -182,7 +186,7 @@ describe('tests metabase to sendinblue connector', () => {
   });
 
   describe('sync available attributes from metabase to sendinblue (syncAvailableAttributes)', () => {
-    const testPrefix = 'TEST-ATTRS-DO-NOT-REMOVE';
+    const testPrefix = 'TEST-ATTRS-NAMES';
     const sendinblueExistingAttributeName = `${testPrefix}-DUMMY`;
     const metabaseAttributes = [
       getMetabaseAttribute(1, `${testPrefix}-FAVORITE-COLOR`, 'type/Text'),
@@ -264,8 +268,244 @@ describe('tests metabase to sendinblue connector', () => {
     });
   });
 
+  describe('sync contacts with attributes values (syncContactWithAttributesValues)', () => {
+    const testPrefix = 'TEST-ATTRS-VALUES';
+    let metabaseTestQuestion: MetabaseDetailedQuestion;
+    let metabaseTestQuestionWithUpdatedAttributes: MetabaseDetailedQuestion;
+    let sendinblueTestList: number;
+
+    beforeEach(() => {
+      return cleanFolderAndCollection(clients).then(() => {
+        return Promise.all([
+          clients.sendinblue.createContactList(testPrefix, config.sendinblue.testFolderId).then(({id}) => {
+            sendinblueTestList = id;
+          }),
+
+          createTestMetabaseQuestion(
+            'tests-e2e-all',
+            `select *
+            from (
+              values
+              ('A@hey.com', 'A', 1),
+              ('B@hey.com', 'B', 2),
+              ('C@hey.com', 'C', 3)
+              ) as q ("email", "${testPrefix}-ATTR1", "${testPrefix}-ATTR2")
+              `
+          ).then((createdQuestion) => {
+            metabaseTestQuestion = createdQuestion;
+            return syncAvailableAttributes(clients, metabaseTestQuestion.id);
+          }),
+
+          createTestMetabaseQuestion(
+            'tests-e2e-all',
+            `select *
+            from (
+              values
+              ('A@hey.com', 'A', null),
+              ('B@hey.com', 'B', 4), -- previous is 2, should be updated
+              ('C@hey.com', 'C', 3) -- no changes, should not appear in the contacts to update
+              ) as q ("email", "${testPrefix}-ATTR1", "${testPrefix}-ATTR2")
+              `
+          ).then((createdQuestion) => {
+            metabaseTestQuestionWithUpdatedAttributes = createdQuestion;
+          })
+        ]);
+      });
+    });
+
+    afterEach(() => {
+      const attributesToRemove = [`${testPrefix}-ATTR1`, `${testPrefix}-ATTR2`];
+      return Promise.all([
+        cleanFolderAndCollection(clients),
+        // remove the test attributes on sendinblue
+        mapSeries(attributesToRemove, (attributeName) => {
+          return clients.sendinblue.removeContactAttribute(attributeName);
+        })
+      ]);
+    });
+
+    it('should sync the available contacts with attributes to update', () => {
+      return clients.metabase
+        .runQuestion(metabaseTestQuestion.id)
+        .then((metabaseContacts) => {
+          expect(metabaseContacts.sort(sortByEmail)).toMatchInlineSnapshot(`
+[
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "A",
+    "TEST-ATTRS-VALUES-ATTR2": 1,
+    "email": "a@hey.com",
+  },
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "B",
+    "TEST-ATTRS-VALUES-ATTR2": 2,
+    "email": "b@hey.com",
+  },
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "C",
+    "TEST-ATTRS-VALUES-ATTR2": 3,
+    "email": "c@hey.com",
+  },
+]
+`);
+          return syncAvailableAttributes(clients, metabaseTestQuestion.id).then((sendinblueAttributesFromMetabase) => {
+            expect(sendinblueAttributesFromMetabase).toMatchInlineSnapshot(`
+{
+  "EMAIL": {
+    "fromMetabaseValue": [Function],
+    "type": "text",
+  },
+  "TEST-ATTRS-VALUES-ATTR1": {
+    "fromMetabaseValue": [Function],
+    "type": "text",
+  },
+  "TEST-ATTRS-VALUES-ATTR2": {
+    "fromMetabaseValue": [Function],
+    "type": "float",
+  },
+}
+`);
+            return syncContactWithAttributesValues(
+              clients,
+              metabaseContacts,
+              [], // the sendinblue list is empty, no need to fetch the contacts
+              sendinblueTestList,
+              sendinblueAttributesFromMetabase
+            ).then((sendinblueContactsWithUpdatedAttributes) => {
+              expect(sendinblueContactsWithUpdatedAttributes.sort(sortByEmail)).toMatchInlineSnapshot(`
+[
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "A",
+      "TEST-ATTRS-VALUES-ATTR2": 1,
+    },
+    "email": "a@hey.com",
+  },
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "B",
+      "TEST-ATTRS-VALUES-ATTR2": 2,
+    },
+    "email": "b@hey.com",
+  },
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "C",
+      "TEST-ATTRS-VALUES-ATTR2": 3,
+    },
+    "email": "c@hey.com",
+  },
+]
+`);
+            });
+          });
+        })
+        .then(() => {
+          return clients.metabase.runQuestion(metabaseTestQuestionWithUpdatedAttributes.id).then((metabaseContacts) => {
+            expect(metabaseContacts.sort(sortByEmail)).toMatchInlineSnapshot(`
+[
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "A",
+    "TEST-ATTRS-VALUES-ATTR2": null,
+    "email": "a@hey.com",
+  },
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "B",
+    "TEST-ATTRS-VALUES-ATTR2": 4,
+    "email": "b@hey.com",
+  },
+  {
+    "TEST-ATTRS-VALUES-ATTR1": "C",
+    "TEST-ATTRS-VALUES-ATTR2": 3,
+    "email": "c@hey.com",
+  },
+]
+`);
+            return syncAvailableAttributes(clients, metabaseTestQuestionWithUpdatedAttributes.id).then(
+              (sendinblueAttributesFromMetabase) => {
+                expect(sendinblueAttributesFromMetabase).toMatchInlineSnapshot(`
+{
+  "EMAIL": {
+    "fromMetabaseValue": [Function],
+    "type": "text",
+  },
+  "TEST-ATTRS-VALUES-ATTR1": {
+    "fromMetabaseValue": [Function],
+    "type": "text",
+  },
+  "TEST-ATTRS-VALUES-ATTR2": {
+    "fromMetabaseValue": [Function],
+    "type": "float",
+  },
+}
+`);
+                return clients.sendinblue.fetchContactsFromList(sendinblueTestList).then((sendinblueContacts) => {
+                  expect(
+                    sendinblueContacts
+                      .map((c) => {
+                        return pick(c, ['email', 'attributes']);
+                      })
+                      .sort(sortByEmail)
+                  ).toMatchInlineSnapshot(`
+[
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "A",
+      "TEST-ATTRS-VALUES-ATTR2": 1,
+    },
+    "email": "a@hey.com",
+  },
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "B",
+      "TEST-ATTRS-VALUES-ATTR2": 2,
+    },
+    "email": "b@hey.com",
+  },
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "C",
+      "TEST-ATTRS-VALUES-ATTR2": 3,
+    },
+    "email": "c@hey.com",
+  },
+]
+`);
+                  return syncContactWithAttributesValues(
+                    clients,
+                    metabaseContacts,
+                    sendinblueContacts,
+                    sendinblueTestList,
+                    sendinblueAttributesFromMetabase
+                  ).then((sendinblueContactsWithUpdatedAttributes) => {
+                    expect(sendinblueContactsWithUpdatedAttributes.sort(sortByEmail)).toMatchInlineSnapshot(`
+[
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "A",
+      "TEST-ATTRS-VALUES-ATTR2": null,
+    },
+    "email": "a@hey.com",
+  },
+  {
+    "attributes": {
+      "TEST-ATTRS-VALUES-ATTR1": "B",
+      "TEST-ATTRS-VALUES-ATTR2": 4,
+    },
+    "email": "b@hey.com",
+  },
+]
+`);
+                  });
+                });
+              }
+            );
+          });
+        });
+    });
+  });
+
   describe('sync everything (lists, attributes & contacts)', () => {
-    const testPrefix = 'TEST-ALL-DO-NOT-REMOVE';
+    const testPrefix = 'TEST-ALL';
     const sendinblueExistingAttributeName = `${testPrefix}-DUMMY`;
     const metabaseAttributes = [
       getMetabaseAttribute(1, `${testPrefix}-FAVORITE-COLOR`, 'type/Text'),
@@ -281,12 +521,12 @@ describe('tests metabase to sendinblue connector', () => {
         return createTestMetabaseQuestion(
           'tests-e2e-all',
           `select *
-          from (
-            values
-            ('contact1@hey.com', 'blue', '2022-11-03 16:02:12.056659+0'::timestamptz),
-            ('contact2@hey.com', 'red', '2022-12-09 17:32:12.056659+0'::timestamptz)
-          ) as q ("email", "${testPrefix}-FAVORITE-COLOR", "${testPrefix}-CREATEDAT")
-      `
+            from (
+              values
+              ('1@hey.com', 'blue', '2022-11-03 16:02:12.056659+0'::timestamptz),
+              ('2@hey.com', 'red', '2022-12-09 17:32:12.056659+0'::timestamptz)
+            ) as q ("email", "${testPrefix}-FAVORITE-COLOR", "${testPrefix}-CREATEDAT")
+        `
         ).then((createdQuestion) => {
           metabaseTestQuestion = createdQuestion;
         });
@@ -308,59 +548,44 @@ describe('tests metabase to sendinblue connector', () => {
       if (!metabaseTestQuestion) {
         throw new Error('no metabaseTestQuestion, beforeEach() went wrong');
       }
-      return clients.sendinblue
-        .createContactAttribute(sendinblueExistingAttributeName, 'text')
-        .then(() => syncAll(config.metabase.testCollectionId, config.sendinblue.testFolderId))
-        .then((syncOutput) => {
-          expect(syncOutput).toMatchInlineSnapshot(`
+
+      return (
+        clients.sendinblue
+          // we create some attributes to ensure they'll be deleted
+          .createContactAttribute(sendinblueExistingAttributeName, 'text')
+          .then(() => syncAll(config.metabase.testCollectionId, config.sendinblue.testFolderId))
+          .then((syncOutput) => {
+            const outputSorted = syncOutput.map((output) => {
+              return {
+                ...output,
+                contacts: {
+                  removed: output.contacts.removed.sort(sortByEmail),
+                  upserted: output.contacts.removed.sort(sortByEmail)
+                }
+              };
+            });
+            expect(outputSorted).toMatchInlineSnapshot(`
 [
   {
     "attributes": {
       "created": {
-        "TEST-ALL-DO-NOT-REMOVE-CREATEDAT": {
-          "fromMetabaseValue": [Function],
-          "type": "date",
-        },
-        "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR": {
+        "EMAIL": {
           "fromMetabaseValue": [Function],
           "type": "text",
         },
-        "email": {
+        "TEST-ALL-CREATEDAT": {
+          "fromMetabaseValue": [Function],
+          "type": "date",
+        },
+        "TEST-ALL-FAVORITE-COLOR": {
           "fromMetabaseValue": [Function],
           "type": "text",
         },
       },
     },
     "contacts": {
-      "created": [
-        {
-          "TEST-ALL-DO-NOT-REMOVE-CREATEDAT": "2022-11-03T16:02:12.056659Z",
-          "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR": "blue",
-          "email": "contact1@hey.com",
-        },
-        {
-          "TEST-ALL-DO-NOT-REMOVE-CREATEDAT": "2022-12-09T17:32:12.056659Z",
-          "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR": "red",
-          "email": "contact2@hey.com",
-        },
-      ],
       "removed": [],
-      "updatedWithAttributes": [
-        {
-          "attributes": {
-            "TEST-ALL-DO-NOT-REMOVE-CREATEDAT": "2022-11-03",
-            "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR": "blue",
-          },
-          "email": "contact1@hey.com",
-        },
-        {
-          "attributes": {
-            "TEST-ALL-DO-NOT-REMOVE-CREATEDAT": "2022-12-09",
-            "TEST-ALL-DO-NOT-REMOVE-FAVORITE-COLOR": "red",
-          },
-          "email": "contact2@hey.com",
-        },
-      ],
+      "upserted": [],
     },
     "metabaseQuestion": {
       "collection_position": null,
@@ -388,7 +613,8 @@ describe('tests metabase to sendinblue connector', () => {
   },
 ]
 `);
-        });
+          })
+      );
     });
   });
 });

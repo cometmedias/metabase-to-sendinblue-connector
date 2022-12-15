@@ -4,7 +4,7 @@
   "description": "Synchronize Metabase views with SendInBlue contact lists",
   "main": "index.js",
   "scripts": {
-    "test": "jest",
+    "test": "jest --runInBand",
     "build": "npm run clean && swc src -d dist && cp package*.json dist",
     "clean": "rm -rf dist",
     "start:run": "node dist/bin/run.js",

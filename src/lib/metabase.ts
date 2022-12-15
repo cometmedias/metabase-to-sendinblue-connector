@@ -177,7 +177,7 @@ export class MetabaseClient {
           }
         });
       })
-      .catch(onAxiosError('cannot make request on metabase'))
+      .catch(onAxiosError('cannot make request on metabase', axiosConfig))
       .catch((error) => {
         logger.error(`error making request to metabase: ${error}`);
         // no need to retry when we have these errors
@@ -216,7 +216,7 @@ export class MetabaseClient {
       url: `${this.config.host}/api/collection/${collectionId}/items?models=card`
     })
       .then((response) => response.data.data as MetabaseQuestion[])
-      .catch(onError("cannot fetch sendinblue's questions on metabase"));
+      .catch(onError(`cannot fetch questions from collection ${collectionId} on metabase`));
   }
 
   // // https://www.metabase.com/docs/latest/api/card#get-apicard
@@ -226,24 +226,41 @@ export class MetabaseClient {
       method: 'GET',
       url: `${this.config.host}/api/card/${questionId}`
     })
-      .then((response) => response.data as MetabaseDetailedQuestion)
-      .catch(onError(`cannot fetch sendinblue's question ${questionId} on metabase`));
+      .then((response) => {
+        const question = response.data as MetabaseDetailedQuestion;
+        return {
+          ...question,
+          result_metadata: question.result_metadata.map((attribute) => {
+            return {
+              ...attribute,
+              // on sendinblue created attributes are uppercased,
+              // we do this here to avoid comparing with lowercased attributes latter
+              name: attribute.name.toUpperCase()
+            };
+          })
+        };
+      })
+      .catch(onError(`cannot fetch question ${questionId} on metabase`));
   }
 
-  // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idquery
+  // https://www.metabase.com/docs/latest/api/card#post-apicardcard-idqueryexport-format
   runQuestion(questionId: number): Promise<MetabaseContact[]> {
     logger.info(`running metabase question ${questionId}`);
     return this.makeRequest({
       method: 'POST',
-      url: `${this.config.host}/api/card/${questionId}/query`
+      url: `${this.config.host}/api/card/${questionId}/query/json`
     })
-      .then((response) => response.data.data)
-      .then(({rows, cols}) => {
-        return rows.map((row: any) => {
-          return row.reduce((acc: any, value: any, index: number) => {
-            acc[cols[index].name] = value;
+      .then((response) => response.data)
+      .then((contacts) => {
+        return contacts.map((contact: MetabaseContact) => {
+          return Object.keys(contact).reduce((acc, key) => {
+            if (key === 'email') {
+              acc.email = contact.email.toLowerCase();
+            } else {
+              acc[key.toUpperCase()] = contact[key];
+            }
             return acc;
-          }, {});
+          }, {} as Partial<MetabaseContact>);
         });
       })
       .catch(onError(`cannot run question ${questionId} on metabase`));

@@ -1,5 +1,5 @@
 import {map as mapP, mapSeries} from 'bluebird';
-import {identity, map, omit, pickBy} from 'lodash';
+import {groupBy, identity, map, omit, pickBy, truncate} from 'lodash';
 import {config} from './config';
 import {onError} from './error';
 import {logger} from './logger';
@@ -37,9 +37,8 @@ type SyncMetabaseQuestionToSendinblueResult = {
     created: Record<string, SendinblueAttribute>;
   };
   contacts: {
-    created: MetabaseContact[];
+    upserted: SendinblueContactUpdatePayload[];
     removed: SendinblueContact[];
-    updatedWithAttributes: SendinblueContactUpdatePayload[];
   };
 };
 
@@ -100,7 +99,8 @@ export function createSendinblueContactLists(
   sendinblueFolderId: number
 ) {
   logger.info(`creating list to sendinblue from metabase question : ${metabaseQuestion.name}`);
-  const sendinblueListName = `${metabaseQuestion.id}_${metabaseQuestion.name}`;
+  // sendinblue list names are 50 characters maximum
+  const sendinblueListName = truncate(`${metabaseQuestion.id}_${metabaseQuestion.name}`, {length: 50});
   return clients.sendinblue
     .createContactList(sendinblueListName, sendinblueFolderId)
     .then((createdList) => createdList.id)
@@ -115,19 +115,21 @@ export function syncAvailableAttributes(
     clients.metabase.fetchQuestion(metabaseQuestionId),
     clients.sendinblue.fetchContactAttributes()
   ]).then(([metabaseDetailedQuestion, sendinblueContactAttributes]) => {
-    const diffContactsAttributes = diff(sendinblueContactAttributes, metabaseDetailedQuestion.result_metadata, 'name');
-    const sendinblueAttributesFromMetabase = fromMetabaseToSendinblueAttributesTypes(
-      metabaseDetailedQuestion.result_metadata
-    );
+    const metabaseAttributes = metabaseDetailedQuestion.result_metadata;
+
+    const diffContactsAttributes = diff(sendinblueContactAttributes, metabaseAttributes, 'name');
+    const sendinblueAttributesFromMetabase = fromMetabaseToSendinblueAttributesTypes(metabaseAttributes);
     const diffContactsAttributesAddedNames = new Set(map(diffContactsAttributes.added, 'name'));
+
     const sendinblueAttributesToCreate = pickBy(sendinblueAttributesFromMetabase, (_value, key) => {
       return diffContactsAttributesAddedNames.has(key);
     });
+
     // since the sendinblue attributes are shared between list
     // we won't remove the sendinblue attributes that don't appear in the metabase question
     // because they might be used in other sendinblue contacts lists
     return mapP(
-      Object.entries(omit(sendinblueAttributesToCreate, 'email')),
+      Object.entries(omit(sendinblueAttributesToCreate, 'EMAIL')),
       ([attributeName, {type}]) => {
         return clients.sendinblue.createContactAttribute(attributeName, type);
       },
@@ -136,62 +138,38 @@ export function syncAvailableAttributes(
   });
 }
 
-export function syncContacts(
+export function removeRemovedContacts(
   clients: ApiClients,
   sendinblueListId: number,
   metabaseContacts: MetabaseContact[],
   sendinblueContacts: SendinblueContact[]
-): Promise<{upserted: MetabaseContact[]; removed: SendinblueContact[]}> {
-  const {added: contactsToRemoveOnSendinblue, removed: contactsToCreateOnSendinblue} = diff(
-    metabaseContacts,
-    sendinblueContacts,
-    'email'
+): Promise<SendinblueContact[]> {
+  const {added: contactsToRemoveOnSendinblue} = diff(metabaseContacts, sendinblueContacts, 'email');
+  return mapP(
+    contactsToRemoveOnSendinblue,
+    (contact) => {
+      // remove the contact from the current sendinblue list
+      return clients.sendinblue
+        .updateContacts([{email: contact.email, unlinkListIds: [sendinblueListId]}])
+        .catch((error) => {
+          logger.error(
+            `encountered an error removing contact ${contact.email} from ${sendinblueListId} sendinblue list (keep going for next contacts): ${error}`
+          );
+        })
+        .then(() => contact);
+    },
+    {concurrency: config.sendinblue.requestsConcurrency}
   );
-  return Promise.all([
-    mapP(
-      contactsToCreateOnSendinblue,
-      (contact) => {
-        // create or update contact (add it to sendinblue list)
-        return clients.sendinblue
-          .upsertContact({email: contact.email, listIds: [sendinblueListId]})
-          .catch((error) => {
-            logger.error(
-              `encountered an error creating contact ${contact.email} on ${sendinblueListId} sendinblue list (keep going for next contacts): ${error} ${error.stack}`
-            );
-          })
-          .then(() => contact);
-      },
-      {concurrency: config.sendinblue.requestsConcurrency}
-    ),
-    mapP(
-      contactsToRemoveOnSendinblue,
-      (contact) => {
-        // remove the contact from the current sendinblue list
-        return clients.sendinblue
-          .updateContacts([{email: contact.email, unlinkListIds: [sendinblueListId]}])
-          .catch((error) => {
-            logger.error(
-              `encountered an error removing contact ${contact.email} from ${sendinblueListId} sendinblue list (keep going for next contacts): ${error}`
-            );
-          })
-          .then(() => contact);
-      },
-      {concurrency: config.sendinblue.requestsConcurrency}
-    )
-  ]).then(([upsertedContacts, removedContacts]) => {
-    return {
-      upserted: upsertedContacts.filter(Boolean),
-      removed: removedContacts.filter(Boolean)
-    };
-  });
 }
 
-function syncContactAttributesValues(
+export function syncContactWithAttributesValues(
   clients: ApiClients,
   metabaseContacts: MetabaseContact[],
+  sendinblueContacts: SendinblueContact[],
+  sendinblueListId: number,
   sendinblueAttributesFromMetabase: Record<string, SendinblueAttribute>
 ): Promise<SendinblueContactUpdatePayload[]> {
-  function toSendinblueAttributes(metabaseContact: MetabaseContact, attributesNames: string[]) {
+  function fromMetabaseToSendinblueAttributes(metabaseContact: MetabaseContact, attributesNames: string[]) {
     return attributesNames.reduce((acc: Record<string, any>, attributeName) => {
       const metabaseAttributeValue = metabaseContact[attributeName];
       const sendinblueAttribute = sendinblueAttributesFromMetabase[attributeName];
@@ -201,19 +179,40 @@ function syncContactAttributesValues(
       return acc;
     }, {});
   }
+
+  // format contacts found on metabase to sendinblue contacts
   const sendinblueContactsWithUpdatedAttributes = metabaseContacts.map((metabaseContact) => {
-    const attributesNames = Object.keys(omit(metabaseContact, 'email'));
+    const attributesNames = Object.keys(omit(metabaseContact, 'EMAIL'));
     return {
       email: metabaseContact.email,
-      attributes: toSendinblueAttributes(metabaseContact, attributesNames)
+      attributes: fromMetabaseToSendinblueAttributes(metabaseContact, attributesNames)
     } as SendinblueContactUpdatePayload;
   });
+
+  // filter out existing sendinblue contacts already having the correct attributes values
+  const existingSendinblueContactsByEmail = groupBy(sendinblueContacts, 'email');
+  const sendinblueContactsToUpdate = sendinblueContactsWithUpdatedAttributes.filter((contactToUpdate) => {
+    const existingContacts = existingSendinblueContactsByEmail[contactToUpdate.email || ''] || [];
+    const existingContact = existingContacts[0];
+    // the contact doesn't exist on sendinbllue: keep it
+    if (!existingContact) {
+      return true;
+    }
+
+    // keep the contact for update if at least one attribute needs to be updated
+    const contactToUpdateAttributes = contactToUpdate.attributes || {};
+    return Object.keys(contactToUpdateAttributes).some((attrName) => {
+      return contactToUpdateAttributes[attrName] !== existingContact.attributes[attrName];
+    });
+  });
+
+  // upsert the contacts on sendinblue with attributes
   return clients.sendinblue
-    .updateContacts(sendinblueContactsWithUpdatedAttributes)
+    .importContactsInListBatch(sendinblueContactsToUpdate, [sendinblueListId])
     .catch((error) => {
       logger.error(`couldn't sync sendinblue contacts, reason: ${JSON.stringify(error)}`);
     })
-    .then(() => sendinblueContactsWithUpdatedAttributes);
+    .then(() => sendinblueContactsToUpdate);
 }
 
 export function syncAll(
@@ -231,54 +230,90 @@ export function syncAll(
     clients.metabase.fetchQuestionsFromCollection(metabaseCollectionId)
   ]).then(([sendinblueLists, metabaseQuestions]) => {
     // 1. for each metabase question...
-    return mapSeries(metabaseQuestions, (metabaseQuestion) => {
-      const sendinblueTargetedList = sendinblueLists.find((list) => {
-        return list.name.startsWith(`${metabaseQuestion.id}_`);
-      });
+    return mapSeries(metabaseQuestions, (metabaseQuestion, i) => {
+      logger.info(`👉 syncing metabase question to sendinblue list ${i + 1}/${metabaseQuestions.length}`);
 
+      const questionPrefix = `${metabaseQuestion.id}_`;
+      const sendinblueTargetedList = sendinblueLists.find((list) => list.name.startsWith(questionPrefix));
+
+      // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
       return (
-        sendinblueTargetedList
-          ? Promise.resolve(sendinblueTargetedList.id)
-          : // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
-            createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId)
-      ).then((sendinblueListId) => {
-        // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
-        // here we only sync their names & types, not the values they'll have for each contact
-        return syncAvailableAttributes(clients, metabaseQuestion.id).then((sendinblueAttributesFromMetabase) => {
-          return Promise.all([
-            clients.metabase.runQuestion(metabaseQuestion.id),
-            clients.sendinblue.fetchContactsFromList(sendinblueListId)
-          ]).then(([metabaseContacts, sendinblueContacts]) => {
-            // 4. ...create contacts present on metabase question but not in sendinblue list
-            //  and remove contacts not present on metabase question but in sendinblue list
-            return syncContacts(clients, sendinblueListId, metabaseContacts, sendinblueContacts).then(
-              (contactsSyncStatus) => {
-                // 5. ...update the attributes values on sendinblue contacts to match the
-                // values fetched from metabase question
-                return syncContactAttributesValues(clients, metabaseContacts, sendinblueAttributesFromMetabase).then(
-                  (sendinblueContactsWithUpdatedAttributes) => {
-                    return {
-                      metabaseQuestion: metabaseQuestion,
-                      sendInBlueTargetedList: {
-                        id: sendinblueListId,
-                        existed: Boolean(sendinblueTargetedList)
-                      },
-                      attributes: {
-                        created: sendinblueAttributesFromMetabase
-                      },
-                      contacts: {
-                        created: contactsSyncStatus.upserted,
-                        removed: contactsSyncStatus.removed,
-                        updatedWithAttributes: sendinblueContactsWithUpdatedAttributes
-                      }
-                    };
-                  }
-                );
-              }
+        (
+          sendinblueTargetedList
+            ? Promise.resolve(sendinblueTargetedList.id)
+            : createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId)
+        )
+
+          // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
+          // here we only sync their names & types, not the values they'll have for each contact
+          .then((sendinblueListId) => {
+            return syncAvailableAttributes(clients, metabaseQuestion.id).then((sendinblueAttributesFromMetabase) => ({
+              sendinblueListId,
+              sendinblueAttributesFromMetabase
+            }));
+          })
+
+          // 4. ...fetch the contacts from both side, so we can...
+          .then(({sendinblueListId, sendinblueAttributesFromMetabase}) => {
+            return Promise.all([
+              clients.metabase.runQuestion(metabaseQuestion.id),
+              clients.sendinblue.fetchContactsFromList(sendinblueListId)
+            ]).then(([metabaseContacts, sendinblueContacts]) => ({
+              sendinblueAttributesFromMetabase,
+              metabaseContacts,
+              sendinblueContacts,
+              sendinblueListId
+            }));
+          })
+
+          // 5. ...remove contacts not present on metabase question but in sendinblue list...
+          .then(({sendinblueAttributesFromMetabase, metabaseContacts, sendinblueContacts, sendinblueListId}) => {
+            return removeRemovedContacts(clients, sendinblueListId, metabaseContacts, sendinblueContacts).then(
+              (sendinblueRemovedContacts) => ({
+                metabaseContacts,
+                sendinblueContacts,
+                sendinblueListId,
+                sendinblueAttributesFromMetabase,
+                sendinblueRemovedContacts
+              })
             );
-          });
-        });
-      });
+          })
+
+          // 6. ...and sync the contacts with the attributes values on sendinblue contacts to match the
+          // values fetched from metabase question
+          .then(
+            ({
+              metabaseContacts,
+              sendinblueListId,
+              sendinblueAttributesFromMetabase,
+              sendinblueContacts,
+              sendinblueRemovedContacts
+            }) => {
+              return syncContactWithAttributesValues(
+                clients,
+                metabaseContacts,
+                sendinblueContacts,
+                sendinblueListId,
+                sendinblueAttributesFromMetabase
+              ).then((sendinblueContactsWithUpdatedAttributes) => {
+                return {
+                  metabaseQuestion: metabaseQuestion,
+                  sendInBlueTargetedList: {
+                    id: sendinblueListId,
+                    existed: Boolean(sendinblueTargetedList)
+                  },
+                  attributes: {
+                    created: sendinblueAttributesFromMetabase
+                  },
+                  contacts: {
+                    upserted: sendinblueContactsWithUpdatedAttributes,
+                    removed: sendinblueRemovedContacts
+                  }
+                };
+              });
+            }
+          )
+      );
     });
   });
 }

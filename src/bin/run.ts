@@ -24,11 +24,10 @@ syncAll(config.metabase.collectionId, config.sendinblue.folderId)
         .map(({metabaseQuestion, sendInBlueTargetedList: sibtl, attributes, contacts}) => {
           return dedent`
           👉 [${metabaseQuestion.id}] ${metabaseQuestion.name} -> ${sibtl.id} (existed: ${sibtl.existed})
-                - attibutes created: ${Object.keys(attributes).join(', ')}
+                - attibutes created: ${Object.keys(attributes.created).join(', ')}
                 - contacts:
-                    - created: ${contacts.created.length}
+                    - upserted: ${contacts.upserted.length}
                     - removed: ${contacts.removed.length}
-                    - updatedWithAttributes: ${contacts.updatedWithAttributes.length}
 
         `;
         })

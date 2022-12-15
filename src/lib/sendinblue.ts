@@ -1,6 +1,6 @@
 import axios, {AxiosRequestConfig, AxiosResponse} from 'axios';
-import {delay, Promise, map} from 'bluebird';
-import {chunk} from 'lodash';
+import {delay, Promise, map, mapSeries} from 'bluebird';
+import {chunk, flatten, last, range} from 'lodash';
 import {onAxiosError, onError} from './error';
 import {logger} from './logger';
 
@@ -24,7 +24,8 @@ export type SendinblueContact = {
   attributes: Record<string, any>;
 };
 
-type SendinblueContactCreatePayload = Partial<Omit<SendinblueContact, 'id' | 'createdAt' | 'modifiedAt'>>;
+type SendinblueContactCreatePayload = Pick<SendinblueContact, 'email'> &
+  Partial<Omit<SendinblueContact, 'id' | 'email' | 'createdAt' | 'modifiedAt'>>;
 
 export type SendinblueContactUpdatePayload = SendinblueContactCreatePayload & {
   unlinkListIds?: number[];
@@ -48,6 +49,12 @@ export type SendinblueConfig = {
   requestsConcurrency: number;
 };
 
+type SendinblueProcessStatus = {
+  id: number;
+  status: 'queued' | 'in_process' | 'completed';
+  name: string;
+};
+
 export class SendinblueClient {
   constructor(private config: SendinblueConfig) {}
 
@@ -56,9 +63,6 @@ export class SendinblueClient {
     retries = 0,
     options = {logError: true}
   ): Promise<AxiosResponse> {
-    logger.info(
-      `${retries > 0 ? `(retry ${retries}) ` : ''}making request on sendinblue: ${JSON.stringify(axiosConfig)}`
-    );
     return axios({
       ...axiosConfig,
       headers: {
@@ -66,7 +70,7 @@ export class SendinblueClient {
         'api-key': this.config.apiKey
       }
     })
-      .catch(onAxiosError('cannot make request on sendinblue'))
+      .catch(onAxiosError('cannot make request on sendinblue', axiosConfig))
       .catch((error) => {
         if (options.logError) {
           logger.error(`error making request to sendinblue: ${error}`);
@@ -80,6 +84,27 @@ export class SendinblueClient {
         }
         return delay(retries * 1000).then(() => this.makeRequest(axiosConfig, retries + 1));
       });
+  }
+
+  private fetchProcessStatus(processId: number) {
+    return this.makeRequest({
+      method: 'GET',
+      url: `${this.config.baseUrl}/processes/${processId}`
+    })
+      .then((response) => response.data as SendinblueProcessStatus)
+      .catch(onError(`cannot fetch status of process ${processId} on sendinblue`));
+  }
+
+  private waitForProcessToComplete(processId: number, processesProgress: string = ''): Promise<void> {
+    return this.fetchProcessStatus(processId).then((processStatus) => {
+      logger.info(
+        `${processesProgress} sendinblue process "${processStatus.name}" (${processId}) status: ${processStatus.status}`
+      );
+      if (processStatus.status === 'completed') {
+        return Promise.resolve();
+      }
+      return delay(2_000).then(() => this.waitForProcessToComplete(processId, processesProgress));
+    });
   }
 
   // https://developers.sendinblue.com/reference/getlists-1
@@ -104,7 +129,7 @@ export class SendinblueClient {
         folderId: folderId
       }
     })
-      .then((response) => response.data)
+      .then((response) => response.data as {id: number})
       .catch(onError(`cannot create contact lists on sendinblue`));
   }
 
@@ -126,13 +151,7 @@ export class SendinblueClient {
     logger.info(`removing all sendinblue contact list of folder ${folderId}`);
     return this.fetchListsOfFolder(folderId)
       .then((lists) => {
-        return map(
-          lists,
-          (list) => {
-            this.removeContactList(list.id);
-          },
-          {concurrency: this.config.requestsConcurrency}
-        );
+        return map(lists, (list) => this.removeContactList(list.id), {concurrency: this.config.requestsConcurrency});
       })
       .then(() => {})
       .catch(onError(`cannot remove all contact lists from folder ${folderId} on sendinblue`));
@@ -140,31 +159,38 @@ export class SendinblueClient {
 
   // https://developers.sendinblue.com/reference/getcontactsfromlist
   fetchContactsFromList(listId: number): Promise<SendinblueContact[]> {
-    const fetchChunk = (
-      acc: SendinblueContact[] = [],
-      offset: number = 0,
-      limit: number = 500
-    ): Promise<SendinblueContact[]> => {
-      logger.info(`fetching sendinblue contacts from list ${listId}, offset ${offset} limit ${limit}`);
-      return this.makeRequest({
-        method: 'GET',
-        url: `${this.config.baseUrl}/contacts/lists/${listId}/contacts`,
-        params: {
-          limit,
-          offset
-        }
-      })
-        .then((response) => {
-          const contacts = response.data.contacts as SendinblueContact[];
-          const newAcc = acc.concat(contacts);
-          if (contacts.length < limit) {
-            return newAcc;
+    const howManyPagesToFetchAtOnce = this.config.requestsConcurrency;
+    const limit = 500;
+
+    // we fetch several pages at once concurrently because on some big contacts list,
+    // fetching serially 500 per 500 contacts is too slow
+    const fetchSeveralPages = (acc: SendinblueContact[] = [], fromPage: number = 0): Promise<SendinblueContact[]> => {
+      return Promise.map(range(fromPage, fromPage + howManyPagesToFetchAtOnce), (page) => {
+        const offset = fromPage + 500 * page;
+
+        logger.info(`fetching sendinblue contacts from list ${listId}, offset ${offset} limit ${limit}`);
+        return this.makeRequest({
+          method: 'GET',
+          url: `${this.config.baseUrl}/contacts/lists/${listId}/contacts`,
+          params: {
+            limit,
+            offset
           }
-          return fetchChunk(newAcc, offset + limit, limit);
         })
-        .catch(onError(`cannot fetch contacts from list: ${listId}`));
+          .then((response) => response.data.contacts as SendinblueContact[])
+          .catch(onError(`cannot fetch contacts from list: ${listId}`));
+      }).then((pages) => {
+        const lastPage = last(pages) || [];
+        const gotItAll = lastPage.length === 0;
+        const newAcc = acc.concat(flatten(pages));
+        if (gotItAll) {
+          return newAcc;
+        }
+        return fetchSeveralPages(newAcc, fromPage + howManyPagesToFetchAtOnce);
+      });
     };
-    return fetchChunk();
+
+    return fetchSeveralPages();
   }
 
   // https://developers.sendinblue.com/reference/getattributes-1
@@ -237,7 +263,8 @@ export class SendinblueClient {
 
   // https://developers.sendinblue.com/reference/updatebatchcontacts
   updateContacts(contacts: SendinblueContactUpdatePayload[]): Promise<void> {
-    const contactsChunks = chunk(contacts, 500);
+    // we cannot create more than 100 contacts per request
+    const contactsChunks = chunk(contacts, 100);
     const totalChunks = contactsChunks.length;
     return Promise.map(
       contactsChunks,
@@ -254,5 +281,29 @@ export class SendinblueClient {
       },
       {concurrency: this.config.requestsConcurrency}
     ).then(() => {});
+  }
+
+  importContactsInListBatch(contacts: SendinblueContactUpdatePayload[], listIds: number[]): Promise<void> {
+    const contactsChunks = chunk(contacts, 5000);
+    const totalChunks = contactsChunks.length;
+    // concurrent requests is of no use here since they are queued on sendinblue side
+    return mapSeries(contactsChunks, (contactsChunk, i) => {
+      logger.info(`importing sendinblue contacts, chunk ${i + 1}/${totalChunks}`);
+      return this.makeRequest({
+        method: 'POST',
+        url: `${this.config.baseUrl}/contacts/import`,
+        data: {
+          listIds,
+          jsonBody: contactsChunk,
+          updateExistingContacts: true,
+          emptyContactsAttributes: false
+        }
+      })
+        .then((response) => {
+          const processId = response.data.processId;
+          return this.waitForProcessToComplete(processId, `${i + 1}/${contactsChunks.length}`);
+        })
+        .catch(onError(`cannot import contacts chunk ${i + 1}/${totalChunks} on sendinblue`));
+    }).then(() => {});
   }
 }
