@@ -257,7 +257,7 @@ export class MetabaseClient {
             if (key === 'email') {
               acc.email = contact.email.toLowerCase();
             } else {
-              acc[key.toUpperCase()] = contact[key];
+              acc[key.toUpperCase().replaceAll(' ', '_')] = contact[key];
             }
             return acc;
           }, {} as Partial<MetabaseContact>);
