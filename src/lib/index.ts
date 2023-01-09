@@ -244,66 +244,63 @@ export function syncAll(
     clients.metabase.fetchQuestionsFromCollection(metabaseCollectionId)
   ]).then(([sendinblueLists, metabaseQuestions]) => {
     // 1. for each metabase question...
-    return mapSeries(
-      metabaseQuestions.filter((q) => q.id === 219),
-      async (metabaseQuestion, i) => {
-        logger.info(`👉 syncing metabase question to sendinblue list ${i + 1}/${metabaseQuestions.length}`);
+    return mapSeries(metabaseQuestions, async (metabaseQuestion, i) => {
+      logger.info(`👉 syncing metabase question to sendinblue list ${i + 1}/${metabaseQuestions.length}`);
 
-        const questionPrefix = `${metabaseQuestion.id}_`;
-        const sendinblueTargetedList = sendinblueLists.find((list) => list.name.startsWith(questionPrefix));
+      const questionPrefix = `${metabaseQuestion.id}_`;
+      const sendinblueTargetedList = sendinblueLists.find((list) => list.name.startsWith(questionPrefix));
 
-        // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
-        const sendinblueListId = sendinblueTargetedList
-          ? await Promise.resolve(sendinblueTargetedList.id)
-          : await createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId);
+      // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
+      const sendinblueListId = sendinblueTargetedList
+        ? await Promise.resolve(sendinblueTargetedList.id)
+        : await createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId);
 
-        // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
-        // here we only sync their names & types, not the values they'll have for each contact
-        const {sendinblueAttributesFromMetabase, sendinblueCreatedAttributes} = await syncAvailableAttributes(
-          clients,
-          metabaseQuestion.id
-        );
+      // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
+      // here we only sync their names & types, not the values they'll have for each contact
+      const {sendinblueAttributesFromMetabase, sendinblueCreatedAttributes} = await syncAvailableAttributes(
+        clients,
+        metabaseQuestion.id
+      );
 
-        // 4. ...fetch the contacts from both side, so we can...
-        const [metabaseContacts, sendinblueContacts] = await Promise.all([
-          clients.metabase.runQuestion(metabaseQuestion.id),
-          clients.sendinblue.fetchContactsFromList(sendinblueListId)
-        ]);
+      // 4. ...fetch the contacts from both side, so we can...
+      const [metabaseContacts, sendinblueContacts] = await Promise.all([
+        clients.metabase.runQuestion(metabaseQuestion.id),
+        clients.sendinblue.fetchContactsFromList(sendinblueListId)
+      ]);
 
-        // 5. ...remove contacts not present on metabase question but in sendinblue list...
-        const sendinblueRemovedContacts = await removeRemovedContacts(
-          clients,
-          sendinblueListId,
-          metabaseContacts,
-          sendinblueContacts
-        );
+      // 5. ...remove contacts not present on metabase question but in sendinblue list...
+      const sendinblueRemovedContacts = await removeRemovedContacts(
+        clients,
+        sendinblueListId,
+        metabaseContacts,
+        sendinblueContacts
+      );
 
-        // 6. ...and sync the contacts with the attributes values on sendinblue contacts to match the
-        // values fetched from metabase question
-        const sendinblueContactsWithUpdatedAttributes = await syncContactWithAttributesValues(
-          clients,
-          metabaseContacts,
-          sendinblueContacts,
-          sendinblueListId,
-          sendinblueAttributesFromMetabase
-        );
+      // 6. ...and sync the contacts with the attributes values on sendinblue contacts to match the
+      // values fetched from metabase question
+      const sendinblueContactsWithUpdatedAttributes = await syncContactWithAttributesValues(
+        clients,
+        metabaseContacts,
+        sendinblueContacts,
+        sendinblueListId,
+        sendinblueAttributesFromMetabase
+      );
 
-        return {
-          metabaseQuestion: metabaseQuestion,
-          sendInBlueTargetedList: {
-            id: sendinblueListId,
-            existed: Boolean(sendinblueTargetedList)
-          },
-          attributes: {
-            sendinblueAttributesFromMetabase,
-            sendinblueCreatedAttributes
-          },
-          contacts: {
-            upserted: sendinblueContactsWithUpdatedAttributes,
-            removed: sendinblueRemovedContacts
-          }
-        };
-      }
-    );
+      return {
+        metabaseQuestion: metabaseQuestion,
+        sendInBlueTargetedList: {
+          id: sendinblueListId,
+          existed: Boolean(sendinblueTargetedList)
+        },
+        attributes: {
+          sendinblueAttributesFromMetabase,
+          sendinblueCreatedAttributes
+        },
+        contacts: {
+          upserted: sendinblueContactsWithUpdatedAttributes,
+          removed: sendinblueRemovedContacts
+        }
+      };
+    });
   });
 }
