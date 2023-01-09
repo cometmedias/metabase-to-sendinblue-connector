@@ -347,8 +347,9 @@ describe('tests metabase to sendinblue connector', () => {
   },
 ]
 `);
-          return syncAvailableAttributes(clients, metabaseTestQuestion.id).then((sendinblueAttributesFromMetabase) => {
-            expect(sendinblueAttributesFromMetabase).toMatchInlineSnapshot(`
+          return syncAvailableAttributes(clients, metabaseTestQuestion.id).then(
+            ({sendinblueAttributesFromMetabase}) => {
+              expect(sendinblueAttributesFromMetabase).toMatchInlineSnapshot(`
 {
   "EMAIL": {
     "fromMetabaseValue": [Function],
@@ -364,14 +365,14 @@ describe('tests metabase to sendinblue connector', () => {
   },
 }
 `);
-            return syncContactWithAttributesValues(
-              clients,
-              metabaseContacts,
-              [], // the sendinblue list is empty, no need to fetch the contacts
-              sendinblueTestList,
-              sendinblueAttributesFromMetabase
-            ).then((sendinblueContactsWithUpdatedAttributes) => {
-              expect(sendinblueContactsWithUpdatedAttributes.sort(sortByEmail)).toMatchInlineSnapshot(`
+              return syncContactWithAttributesValues(
+                clients,
+                metabaseContacts,
+                [], // the sendinblue list is empty, no need to fetch the contacts
+                sendinblueTestList,
+                sendinblueAttributesFromMetabase
+              ).then((sendinblueContactsWithUpdatedAttributes) => {
+                expect(sendinblueContactsWithUpdatedAttributes.sort(sortByEmail)).toMatchInlineSnapshot(`
 [
   {
     "attributes": {
@@ -396,8 +397,9 @@ describe('tests metabase to sendinblue connector', () => {
   },
 ]
 `);
-            });
-          });
+              });
+            }
+          );
         })
         .then(() => {
           return clients.metabase.runQuestion(metabaseTestQuestionWithUpdatedAttributes.id).then((metabaseContacts) => {
@@ -421,7 +423,7 @@ describe('tests metabase to sendinblue connector', () => {
 ]
 `);
             return syncAvailableAttributes(clients, metabaseTestQuestionWithUpdatedAttributes.id).then(
-              (sendinblueAttributesFromMetabase) => {
+              ({sendinblueAttributesFromMetabase}) => {
                 expect(sendinblueAttributesFromMetabase).toMatchInlineSnapshot(`
 {
   "EMAIL": {
