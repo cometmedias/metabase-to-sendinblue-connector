@@ -9,7 +9,8 @@ module "metabase_to_sendinblue_connector" {
   entrypoint  = "metabaseToSendInBlueConnector"
   source_dir  = "../dist"
   output_path = "../dist"
-  excludes    = ["node_modules", ".env", ".env.dist"]
+
+  max_instance_count = 1
 
   environment_variables        = var.environment_variables
   secret_environment_variables = var.secret_environment_variables

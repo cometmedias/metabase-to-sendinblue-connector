@@ -1,3 +1,4 @@
+import axios from 'axios';
 import {map as mapP, mapSeries} from 'bluebird';
 import {groupBy, identity, map, omit, pickBy, truncate} from 'lodash';
 import {config} from './config';
@@ -295,7 +296,13 @@ export function syncAll(
                 sendinblueContacts,
                 sendinblueListId,
                 sendinblueAttributesFromMetabase
-              ).then((sendinblueContactsWithUpdatedAttributes) => {
+              ).then(async (sendinblueContactsWithUpdatedAttributes) => {
+                // 7. Send heartbeat to BetterUpTime
+                if(config.betteruptime.heartbeatUrl) {
+                    logger.info('sending heartbeat to BetterUpTime')
+                    await axios.get(config.betteruptime.heartbeatUrl)
+                }
+
                 return {
                   metabaseQuestion: metabaseQuestion,
                   sendInBlueTargetedList: {
