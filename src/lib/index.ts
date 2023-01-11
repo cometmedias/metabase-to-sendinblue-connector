@@ -35,7 +35,8 @@ type SyncMetabaseQuestionToSendinblueResult = {
     existed: boolean;
   };
   attributes: {
-    created: Record<string, SendinblueAttribute>;
+    sendinblueAttributesFromMetabase: Record<string, SendinblueAttribute>;
+    sendinblueCreatedAttributes: Record<string, SendinblueAttribute>;
   };
   contacts: {
     upserted: SendinblueContactUpdatePayload[];
@@ -60,7 +61,12 @@ export function fromMetabaseToSendinblueAttributesTypes(
     // https://github.com/metabase/metabase/blob/f342fe17bd897dd4940a2c23a150a78202fa6b72/src/metabase/driver/postgres.clj#LL568C29-L581C64
     switch (metabaseType) {
       case 'type/Boolean':
-        return {type: 'boolean', fromMetabaseValue: identity};
+        return {
+          type: 'boolean',
+          fromMetabaseValue(value: string | null) {
+            return Boolean(value) ? 'yes' : 'no';
+          }
+        };
 
       case 'type/Date': // "2022-12-08T00:00:00Z"
       case 'type/DateTime': // "2022-12-08T09:23:46.107648Z"
@@ -111,7 +117,10 @@ export function createSendinblueContactLists(
 export function syncAvailableAttributes(
   clients: ApiClients,
   metabaseQuestionId: number
-): Promise<Record<string, SendinblueAttribute>> {
+): Promise<{
+  sendinblueAttributesFromMetabase: Record<string, SendinblueAttribute>;
+  sendinblueCreatedAttributes: Record<string, SendinblueAttribute>;
+}> {
   return Promise.all([
     clients.metabase.fetchQuestion(metabaseQuestionId),
     clients.sendinblue.fetchContactAttributes()
@@ -135,7 +144,12 @@ export function syncAvailableAttributes(
         return clients.sendinblue.createContactAttribute(attributeName, type);
       },
       {concurrency: config.sendinblue.requestsConcurrency}
-    ).then(() => sendinblueAttributesFromMetabase);
+    ).then(() => {
+      return {
+        sendinblueAttributesFromMetabase,
+        sendinblueCreatedAttributes: sendinblueAttributesToCreate
+      };
+    });
   });
 }
 
@@ -183,7 +197,7 @@ export function syncContactWithAttributesValues(
 
   // format contacts found on metabase to sendinblue contacts
   const sendinblueContactsWithUpdatedAttributes = metabaseContacts.map((metabaseContact) => {
-    const attributesNames = Object.keys(omit(metabaseContact, 'EMAIL'));
+    const attributesNames = Object.keys(omit(metabaseContact, 'email'));
     return {
       email: metabaseContact.email,
       attributes: fromMetabaseToSendinblueAttributes(metabaseContact, attributesNames)
@@ -231,96 +245,69 @@ export function syncAll(
     clients.metabase.fetchQuestionsFromCollection(metabaseCollectionId)
   ]).then(([sendinblueLists, metabaseQuestions]) => {
     // 1. for each metabase question...
-    return mapSeries(metabaseQuestions, (metabaseQuestion, i) => {
+    return mapSeries(metabaseQuestions, async (metabaseQuestion, i) => {
       logger.info(`👉 syncing metabase question to sendinblue list ${i + 1}/${metabaseQuestions.length}`);
 
       const questionPrefix = `${metabaseQuestion.id}_`;
       const sendinblueTargetedList = sendinblueLists.find((list) => list.name.startsWith(questionPrefix));
 
       // 2. ...create its sendinblue list equivalent (if it doesn't exist already)
-      return (
-        (
-          sendinblueTargetedList
-            ? Promise.resolve(sendinblueTargetedList.id)
-            : createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId)
-        )
+      const sendinblueListId = sendinblueTargetedList
+        ? await Promise.resolve(sendinblueTargetedList.id)
+        : await createSendinblueContactLists(clients, metabaseQuestion, sendinblueFolderId);
 
-          // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
-          // here we only sync their names & types, not the values they'll have for each contact
-          .then((sendinblueListId) => {
-            return syncAvailableAttributes(clients, metabaseQuestion.id).then((sendinblueAttributesFromMetabase) => ({
-              sendinblueListId,
-              sendinblueAttributesFromMetabase
-            }));
-          })
-
-          // 4. ...fetch the contacts from both side, so we can...
-          .then(({sendinblueListId, sendinblueAttributesFromMetabase}) => {
-            return Promise.all([
-              clients.metabase.runQuestion(metabaseQuestion.id),
-              clients.sendinblue.fetchContactsFromList(sendinblueListId)
-            ]).then(([metabaseContacts, sendinblueContacts]) => ({
-              sendinblueAttributesFromMetabase,
-              metabaseContacts,
-              sendinblueContacts,
-              sendinblueListId
-            }));
-          })
-
-          // 5. ...remove contacts not present on metabase question but in sendinblue list...
-          .then(({sendinblueAttributesFromMetabase, metabaseContacts, sendinblueContacts, sendinblueListId}) => {
-            return removeRemovedContacts(clients, sendinblueListId, metabaseContacts, sendinblueContacts).then(
-              (sendinblueRemovedContacts) => ({
-                metabaseContacts,
-                sendinblueContacts,
-                sendinblueListId,
-                sendinblueAttributesFromMetabase,
-                sendinblueRemovedContacts
-              })
-            );
-          })
-
-          // 6. ...and sync the contacts with the attributes values on sendinblue contacts to match the
-          // values fetched from metabase question
-          .then(
-            ({
-              metabaseContacts,
-              sendinblueListId,
-              sendinblueAttributesFromMetabase,
-              sendinblueContacts,
-              sendinblueRemovedContacts
-            }) => {
-              return syncContactWithAttributesValues(
-                clients,
-                metabaseContacts,
-                sendinblueContacts,
-                sendinblueListId,
-                sendinblueAttributesFromMetabase
-              ).then(async (sendinblueContactsWithUpdatedAttributes) => {
-                // 7. Send heartbeat to BetterUpTime
-                if(config.betteruptime.heartbeatUrl) {
-                    logger.info('sending heartbeat to BetterUpTime')
-                    await axios.get(config.betteruptime.heartbeatUrl)
-                }
-
-                return {
-                  metabaseQuestion: metabaseQuestion,
-                  sendInBlueTargetedList: {
-                    id: sendinblueListId,
-                    existed: Boolean(sendinblueTargetedList)
-                  },
-                  attributes: {
-                    created: sendinblueAttributesFromMetabase
-                  },
-                  contacts: {
-                    upserted: sendinblueContactsWithUpdatedAttributes,
-                    removed: sendinblueRemovedContacts
-                  }
-                };
-              });
-            }
-          )
+      // 3. ...sync the attributes, they are global on sendinblue (not linked to a list)
+      // here we only sync their names & types, not the values they'll have for each contact
+      const {sendinblueAttributesFromMetabase, sendinblueCreatedAttributes} = await syncAvailableAttributes(
+        clients,
+        metabaseQuestion.id
       );
+
+      // 4. ...fetch the contacts from both side, so we can...
+      const [metabaseContacts, sendinblueContacts] = await Promise.all([
+        clients.metabase.runQuestion(metabaseQuestion.id),
+        clients.sendinblue.fetchContactsFromList(sendinblueListId)
+      ]);
+
+      // 5. ...remove contacts not present on metabase question but in sendinblue list...
+      const sendinblueRemovedContacts = await removeRemovedContacts(
+        clients,
+        sendinblueListId,
+        metabaseContacts,
+        sendinblueContacts
+      );
+
+      // 6. ...and sync the contacts with the attributes values on sendinblue contacts to match the
+      // values fetched from metabase question
+      const sendinblueContactsWithUpdatedAttributes = await syncContactWithAttributesValues(
+        clients,
+        metabaseContacts,
+        sendinblueContacts,
+        sendinblueListId,
+        sendinblueAttributesFromMetabase
+      );
+
+      // 7. Send heartbeat to BetterUpTime
+      if(config.betteruptime.heartbeatUrl) {
+        logger.info('sending heartbeat to BetterUpTime')
+        await axios.get(config.betteruptime.heartbeatUrl)
+      }
+
+      return {
+        metabaseQuestion: metabaseQuestion,
+        sendInBlueTargetedList: {
+          id: sendinblueListId,
+          existed: Boolean(sendinblueTargetedList)
+        },
+        attributes: {
+          sendinblueAttributesFromMetabase,
+          sendinblueCreatedAttributes
+        },
+        contacts: {
+          upserted: sendinblueContactsWithUpdatedAttributes,
+          removed: sendinblueRemovedContacts
+        }
+      };
     });
   });
 }
